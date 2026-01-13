@@ -33,7 +33,11 @@ SECRET_KEY = 'django-insecure-n1*q3euj_7h2envk^y_pjus!zb3&tom%jyvj)8p3ip1(t0c00&
 DEBUG = True
 
 ALLOWED_HOSTS = ['127.0.0.1', 'localhost', '0.0.0.0', '.up.railway.app', 'hadsxk-production.up.railway.app']
-
+CSRF_TRUSTED_ORIGINS = [
+    'https://hadsxk-production.up.railway.app',
+    'https://*.railway.app',
+    'https://*.up.railway.app',
+]
 
 # Application definition
 
@@ -166,12 +170,11 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
 # === CORS SETTINGS ===
-CORS_ALLOW_ALL_ORIGINS = True  # For development only
-# For production, use:
-# CORS_ALLOWED_ORIGINS = [
-#     "http://localhost:3000",
-#     "http://127.0.0.1:3000",
-# ]
+CORS_ALLOWED_ORIGINS = [
+    'https://hadsxk-production.up.railway.app',
+    'http://localhost:3000',
+    'http://127.0.0.1:3000',
+]
 
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_METHODS = [
@@ -193,7 +196,15 @@ CORS_ALLOW_HEADERS = [
     'x-csrftoken',
     'x-requested-with',
 ]
+IS_RAILWAY = os.environ.get('RAILWAY_ENVIRONMENT') is not None or os.environ.get('RAILWAY_STATIC_URL') is not None
 
+if IS_RAILWAY:
+    print("🚀 Running on Railway - enabling production settings")
+    DEBUG = False  # Force DEBUG=False on Railway
+    # Enable WhiteNoise for static files
+    STATICFILES_STORAGE = 'whitenoise.storage.CompressedManifestStaticFilesStorage'
+else:
+    print("💻 Running locally - using development settings")
 
 REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
