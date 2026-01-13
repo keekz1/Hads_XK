@@ -70,7 +70,7 @@ from rest_framework.parsers import MultiPartParser, FormParser
 from rest_framework.response import Response
 from rest_framework import status
 from .models import UploadedDocument, UserProfile
- 
+from django.db import transaction  # Add this line
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def register(request):
@@ -87,61 +87,81 @@ def register(request):
     if User.objects.filter(username=username).exists():
         return Response({"error": "Username already exists"}, status=400)
 
-    user = User.objects.create_user(
-        username=username,
-        password=password,
-        email=email
-    )
+    if email and User.objects.filter(email=email).exists():
+        return Response({"error": "Email already exists"}, status=400)
 
-    # Create user profile
-    profile = UserProfile.objects.create(
-        user=user, 
-        level=level,
-        referred_by_code=referred_by
-    )
-    
-    # Handle reseller signup if reseller_code provided
-    if reseller_code:
-        try:
-            reseller = Reseller.objects.get(code=reseller_code, is_active=True)
-            ResellerClient.objects.create(
-                reseller=reseller,
-                user=user,
-                commission_rate=reseller.default_commission_rate,
-                status='active'
+    try:
+        with transaction.atomic():
+            # Create user
+            user = User.objects.create_user(
+                username=username,
+                password=password,
+                email=email
             )
-            profile.reseller_code_used = reseller_code
-            profile.save()
-        except Reseller.DoesNotExist:
-            pass
+
+            # Use get_or_create to handle existing profile
+            profile, created = UserProfile.objects.get_or_create(
+                user=user,
+                defaults={
+                    'level': level,
+                    'referred_by_code': referred_by
+                }
+            )
+            
+            # If profile already exists, update it
+            if not created:
+                profile.level = level
+                profile.referred_by_code = referred_by
+                profile.save()
+            
+            # Handle reseller signup if reseller_code provided
+            if reseller_code:
+                try:
+                    reseller = Reseller.objects.get(code=reseller_code, is_active=True)
+                    ResellerClient.objects.create(
+                        reseller=reseller,
+                        user=user,
+                        commission_rate=reseller.default_commission_rate,
+                        status='active'
+                    )
+                    profile.reseller_code_used = reseller_code
+                    profile.save()
+                except Reseller.DoesNotExist:
+                    pass
+            
+            # Generate JWT tokens
+            refresh = RefreshToken.for_user(user)
+            
+            return Response({
+                "message": "User created successfully",
+                "username": user.username,
+                "tier": "free",
+                "daily_requests_limit": profile.get_tier_limits()['daily_requests'],
+                "requires_api_key": True,
+                "setup_steps": [
+                    "1. Subscribe to a paid plan for higher limits",
+                    "2. Set up your Groq/OpenAI/Anthropic API key",
+                    "3. Start using AI study assistance"
+                ],
+                "reseller_enrolled": bool(reseller_code),
+                # Add JWT tokens to response
+                "tokens": {
+                    "refresh": str(refresh),
+                    "access": str(refresh.access_token),
+                },
+                "user": {
+                    "id": user.id,
+                    "username": user.username,
+                    "email": user.email,
+                    "date_joined": user.date_joined
+                }
+            }, status=201)
+            
+    except Exception as e:
+        return Response({
+            "error": f"Registration failed: {str(e)}"
+        }, status=400)
     
-    # Generate JWT tokens
-    refresh = RefreshToken.for_user(user)
-    
-    return Response({
-        "message": "User created successfully",
-        "username": user.username,
-        "tier": "free",
-        "daily_requests_limit": profile.get_tier_limits()['daily_requests'],
-        "requires_api_key": True,
-        "setup_steps": [
-            "1. Subscribe to a paid plan for higher limits",
-            "2. Set up your Groq/OpenAI/Anthropic API key",
-            "3. Start using AI study assistance"
-        ],
-        "reseller_enrolled": bool(reseller_code),
-        # Add JWT tokens to response
-        "tokens": {
-            "refresh": str(refresh),
-            "access": str(refresh.access_token),
-        },
-        "user": {
-            "id": user.id,
-            "username": user.username,
-            "email": user.email,
-            "date_joined": user.date_joined
-        }
-    }, status=201)
     
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -169,13 +189,16 @@ def login_user(request):
         # Generate JWT tokens
         refresh = RefreshToken.for_user(user)
         
-        # Get or create user profile
-        try:
-            profile = user.userprofile
+        # Get or create user profile using get_or_create
+        profile, created = UserProfile.objects.get_or_create(
+            user=user,
+            defaults={'level': 'beginner'}
+        )
+        
+        if created:
+            print(f"Created new user profile for {user.username}")
+        else:
             print(f"User profile found: {profile.level}")
-        except UserProfile.DoesNotExist:
-            print("Creating new user profile")
-            profile = UserProfile.objects.create(user=user, level="beginner")
         
         print(f"Returning tokens for user: {user.username}")
         
