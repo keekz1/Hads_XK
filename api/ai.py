@@ -6,8 +6,7 @@ import requests
 from django.conf import settings
 from decimal import Decimal
 import time
-from groq import Groq  # Groq Python SDK
-
+import groq  # Groq Python SDK - don't import Groq directly
 # Initialize Redis for caching (optional)
 def get_redis_client():
     """Get Redis client with fallback"""
