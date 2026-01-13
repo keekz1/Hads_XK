@@ -330,3 +330,38 @@ if not DEBUG:
     SESSION_COOKIE_SECURE = True
     CSRF_COOKIE_SECURE = True
     SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    
+    
+    
+    # === RAILWAY PRODUCTION SETTINGS ===
+# Detect if running on Railway
+IS_RAILWAY = os.environ.get('RAILWAY_ENVIRONMENT') is not None
+
+if IS_RAILWAY or not DEBUG:
+    print("🚀 Running in PRODUCTION mode on Railway")
+    
+    # Security settings
+    SECURE_SSL_REDIRECT = True
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    
+    # ADD YOUR RAILWAY URL HERE:
+    CSRF_TRUSTED_ORIGINS = [
+        'https://hadsxk-production.up.railway.app',
+        'https://*.railway.app',
+        'https://*.up.railway.app',
+    ]
+    
+    # CORS settings for production
+    CORS_ALLOW_ALL_ORIGINS = False  # Turn off in production
+    CORS_ALLOWED_ORIGINS = [
+        'https://hadsxk-production.up.railway.app',
+        'http://localhost:3000',  # For local frontend dev
+        'http://127.0.0.1:3000',
+    ]
+    CORS_ALLOW_CREDENTIALS = True
+    
+else:
+    print("💻 Running in LOCAL DEVELOPMENT mode")
+    # Local development settings (as before)
