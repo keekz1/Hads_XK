@@ -4,7 +4,7 @@ from django.utils import timezone
 from django.db.models.signals import post_save
 from django.dispatch import receiver
 from decimal import Decimal
-
+import os
 # === USER PROFILE ===
 class UserProfile(models.Model):
     TIER_CHOICES = [
@@ -1189,39 +1189,7 @@ class ResellerPayout(models.Model):
         super().save(*args, **kwargs)
         
         
-# Add to your models.py
-import os
-import uuid
-from django.core.files.storage import default_storage
-# In UserProfile model's get_tier_limits method
-def get_tier_limits(self):
-    limits = {
-        'free': {
-            'daily_requests': 50,
-            'max_tokens_per_request': 2000,
-            'pdf_limit': 3,  # 3 PDF analyses per month for free tier
-            'can_analyze_pdf': True,
-            'data_analyses_limit': 1,
-            'can_analyze_data': False
-        },
-        'premium': {
-            'daily_requests': 1000,
-            'max_tokens_per_request': 4000,
-            'pdf_limit': 20,  # 20 PDF analyses per month
-            'can_analyze_pdf': True,
-            'data_analyses_limit': 10,
-            'can_analyze_data': True
-        },
-        'unlimited': {
-            'daily_requests': 5000,
-            'max_tokens_per_request': 8000,
-            'pdf_limit': 100,  # 100 PDF analyses per month
-            'can_analyze_pdf': True,
-            'data_analyses_limit': 50,
-            'can_analyze_data': True
-        }
-    }
-    return limits.get(self.subscription_tier, limits['free'])
+ 
 # api/models.py
 class UploadedDocument(models.Model):
     DOCUMENT_TYPES = [
