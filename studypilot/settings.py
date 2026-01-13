@@ -101,52 +101,47 @@ WSGI_APPLICATION = 'studypilot.wsgi.application'
 # settings.py - Force SQLite locally
 import os
 from pathlib import Path
-
+import sys
 # Get DATABASE_URL from environment
-# === DATABASE CONFIGURATION FOR NEON ===
 DATABASE_URL = os.environ.get('DATABASE_URL')
 
-print(f"=== DATABASE CONFIGURATION ===")
-print(f"DATABASE_URL exists: {bool(DATABASE_URL)}")
+# Debug output
+print(f"=== DATABASE CONFIGURATION ===", file=sys.stderr)
+print(f"DATABASE_URL from env: {'Yes' if DATABASE_URL else 'No'}", file=sys.stderr)
 
 if DATABASE_URL:
-    # Convert postgres:// to postgresql:// for dj_database_url
+    # Convert postgres:// to postgresql:// if needed
     if DATABASE_URL.startswith('postgres://'):
         DATABASE_URL = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
     
-    print(f"Connecting to Neon PostgreSQL...")
+    print(f"Connecting to PostgreSQL/Neon...", file=sys.stderr)
     
-    # Use standard PostgreSQL with connection pooling DISABLED
-    # (because Neon has its own pooler)
+    # Parse the DATABASE_URL
     DATABASES = {
         'default': dj_database_url.parse(
             DATABASE_URL,
-            conn_max_age=0,  # IMPORTANT: Set to 0 for Neon
+            conn_max_age=0,  # Important for Neon
             ssl_require=True,
         )
     }
     
     # Add Neon-specific settings
-    DATABASES['default']['CONN_MAX_AGE'] = 0  # Disable Django's connection persistence
-    DATABASES['default']['OPTIONS'] = {
-        'connect_timeout': 10,
-        'keepalives_idle': 30,
-        'keepalives_interval': 10,
-        'keepalives_count': 5,
-    }
+    DATABASES['default']['ENGINE'] = 'django.db.backends.postgresql'
+    DATABASES['default']['CONN_MAX_AGE'] = 0  # Disable connection pooling
+    
+    print(f"Database engine: {DATABASES['default']['ENGINE']}", file=sys.stderr)
+    print(f"Database name: {DATABASES['default'].get('NAME', 'N/A')}", file=sys.stderr)
+    print(f"Database host: {DATABASES['default'].get('HOST', 'N/A')}", file=sys.stderr)
     
 else:
     # Fallback to SQLite for local development
+    print("Using SQLite for local development", file=sys.stderr)
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
             'NAME': BASE_DIR / 'db.sqlite3',
         }
     }
-
-print(f"Database engine: {DATABASES['default']['ENGINE']}")
-print(f"Database name: {DATABASES['default'].get('NAME', 'N/A')}")
-print(f"Database host: {DATABASES['default'].get('HOST', 'N/A')}")
 
 # For production, Railway will override this with DATABASE_URL
 # Don't try to connect to Supabase locally
