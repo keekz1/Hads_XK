@@ -33,8 +33,9 @@ python-dotenv==1.0.0
 redis==5.0.1
 django-redis==5.2.0
 
-# Payment processing (optional)
-stripe==7.6.1
+# Payment processing (optional - removed wrong version)
+# stripe==7.6.1  # REMOVED - wrong version
+stripe==5.5.0    # Use a valid version
 
 # Utilities
 python-dateutil==2.8.2
