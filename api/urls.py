@@ -13,9 +13,7 @@ urlpatterns = [
     path('login/', views.login_user, name='login'),  # Frontend calls /api/login/
     path('register/', views.register, name='register'),  # Frontend calls /api/register/
     
-    # === AUTH ALIASES (for backward compatibility) ===
-    path('login/', views.login_user, name='login_alt'),
-    path('register/', views.register, name='register_alt'),
+    
     
     # === OTHER AUTH ENDPOINTS ===
     path('logout/', views.logout_user, name='logout'),
