@@ -1,4 +1,4 @@
-# api/urls.py - CORRECTED VERSION
+# api/urls.py - FIXED VERSION
 
 from django.urls import path
 from . import views
@@ -9,14 +9,18 @@ urlpatterns = [
     # === HEALTH CHECK ===
     path('health/', health_check, name='health_check'),
     
-    # === USER AUTHENTICATION (SIMPLE ENDPOINTS) ===
-    path('register/', views.register, name='register'),  # Frontend calls this
-    path('login/', views.login_user, name='login'),  # Frontend calls this
+    # === USER AUTHENTICATION (MATCHING FRONTEND ENDPOINTS) ===
+    path('login/', views.login_user, name='login'),  # Frontend calls /api/login/
+    path('register/', views.register, name='register'),  # Frontend calls /api/register/
+    
+    # === AUTH ALIASES (for backward compatibility) ===
+    path('auth/login/', views.login_user, name='login_alt'),
+    path('auth/register/', views.register, name='register_alt'),
+    
+    # === OTHER AUTH ENDPOINTS ===
     path('logout/', views.logout_user, name='logout'),
     path('refresh-token/', views.refresh_token, name='token_refresh'),
     path('current-user/', views.get_current_user, name='current_user'),
-    
-    # === USER PROFILE ===
     path('profile/', views.my_profile, name='my_profile'),
     
     # === DOCUMENT UPLOAD & ANALYSIS ===
@@ -66,5 +70,5 @@ urlpatterns = [
     
     # === TEST ENDPOINTS (for debugging) ===
     path('test-upload/', views.test_upload, name='test_upload'),
-    path('debug-users/', views.debug_users, name='debug_users'),
+    # Removed debug-users since it doesn't exist in views.py
 ]
