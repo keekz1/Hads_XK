@@ -38,16 +38,24 @@ ALLOWED_HOSTS = [
     '0.0.0.0', 
     '.up.railway.app', 
     'hadsxk-production.up.railway.app',
-    'kbytexfrontend.vercel.app',  # Add this WITHOUT https://
-    '.vercel.app',  # This allows ALL vercel domains
+    'kbytexfrontend.vercel.app',
+    '.vercel.app',
+
+     'kbytex.com',
+    'www.kbytex.com',
 ]
+
 CSRF_TRUSTED_ORIGINS = [
     'https://hadsxk-production.up.railway.app',
     'https://*.railway.app',
     'https://*.up.railway.app',
-    'https://kbytexfrontend.vercel.app',  # Add this
-    'https://*.vercel.app',  # This allows ALL vercel domains
+    'https://kbytexfrontend.vercel.app',
+    'https://*.vercel.app',
+
+     'https://kbytex.com',
+    'https://www.kbytex.com',
 ]
+
 # Application definition
 
 INSTALLED_APPS = [
@@ -199,8 +207,13 @@ CORS_ALLOWED_ORIGINS = [
     'https://hadsxk-production.up.railway.app',
     'http://localhost:3000',
     'http://127.0.0.1:3000',
-    'https://kbytexfrontend.vercel.app',  # Add this
+    'https://kbytexfrontend.vercel.app',
+
+    # ✅ Add your custom domain
+    'https://kbytex.com',
+    'https://www.kbytex.com',
 ]
+
 
 
 CORS_ALLOW_CREDENTIALS = True
