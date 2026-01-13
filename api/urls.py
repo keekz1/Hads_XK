@@ -9,8 +9,12 @@ urlpatterns = [
     # === USER AUTHENTICATION ===
     path('register/', views.register, name='register'),
     path('profile/', views.my_profile, name='my_profile'),
-    path('login/', TokenObtainPairView.as_view(), name='login'),
-  # Document upload endpoints
+    path('auth/login/', views.login_user, name='login'),
+    path('auth/register/', views.register, name='register'),
+    path('auth/refresh/', views.refresh_token, name='token_refresh'),
+    path('auth/logout/', views.logout_user, name='logout'),
+    path('auth/user/', views.get_current_user, name='current_user'),
+    path('auth/me/', views.get_current_user, name='current_user'),  # Document upload endpoints
     path('upload-document/', views.upload_document, name='upload_document'),
     path('documents/', views.get_user_documents, name='get_user_documents'),
     path('documents/<int:document_id>/delete/', views.delete_document, name='delete_document'),

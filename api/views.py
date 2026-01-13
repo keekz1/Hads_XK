@@ -21,7 +21,8 @@ import requests
 import json
 import uuid
 from rest_framework_simplejwt.authentication import JWTAuthentication
-
+from rest_framework_simplejwt.tokens import RefreshToken
+from django.contrib.auth import authenticate
 import os
 import time
 import json
@@ -70,7 +71,6 @@ from rest_framework.response import Response
 from rest_framework import status
 from .models import UploadedDocument, UserProfile
  
-
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def register(request):
@@ -115,6 +115,9 @@ def register(request):
         except Reseller.DoesNotExist:
             pass
     
+    # Generate JWT tokens
+    refresh = RefreshToken.for_user(user)
+    
     return Response({
         "message": "User created successfully",
         "username": user.username,
@@ -126,9 +129,177 @@ def register(request):
             "2. Set up your Groq/OpenAI/Anthropic API key",
             "3. Start using AI study assistance"
         ],
-        "reseller_enrolled": bool(reseller_code)
+        "reseller_enrolled": bool(reseller_code),
+        # Add JWT tokens to response
+        "tokens": {
+            "refresh": str(refresh),
+            "access": str(refresh.access_token),
+        },
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "date_joined": user.date_joined
+        }
     }, status=201)
+    
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def login_user(request):
+    """Login user and return JWT tokens"""
+    print("=== LOGIN VIEW CALLED ===")
+    print(f"Request data: {request.data}")
+    
+    username = request.data.get('username')
+    password = request.data.get('password')
+    
+    if not username or not password:
+        print("ERROR: Missing username or password")
+        return Response(
+            {'error': 'Username and password are required'},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    # Authenticate user
+    print(f"Attempting to authenticate user: {username}")
+    user = authenticate(username=username, password=password)
+    
+    if user is not None:
+        print(f"User authenticated successfully: {user.username}")
+        # Generate JWT tokens
+        refresh = RefreshToken.for_user(user)
+        
+        # Get or create user profile
+        try:
+            profile = user.userprofile
+            print(f"User profile found: {profile.level}")
+        except UserProfile.DoesNotExist:
+            print("Creating new user profile")
+            profile = UserProfile.objects.create(user=user, level="beginner")
+        
+        print(f"Returning tokens for user: {user.username}")
+        
+        return Response({
+            "success": True,
+            "message": "Login successful",
+            "user": {
+                "id": user.id,
+                "username": user.username,
+                "email": user.email,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "date_joined": user.date_joined
+            },
+            "profile": {
+                "level": profile.level,
+                "subscription_tier": profile.subscription_tier,
+                "has_api_key": profile.has_api_key()
+            },
+            "tokens": {
+                "refresh": str(refresh),
+                "access": str(refresh.access_token),
+            }
+        })
+    else:
+        print(f"Authentication failed for user: {username}")
+        return Response(
+            {"error": "Invalid credentials"},
+            status=status.HTTP_401_UNAUTHORIZED
+        )
+        
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def refresh_token(request):
+    """Refresh JWT token"""
+    refresh_token = request.data.get('refresh')
+    
+    if not refresh_token:
+        return Response(
+            {"error": "Refresh token is required"},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+    
+    try:
+        refresh = RefreshToken(refresh_token)
+        user_id = refresh['user_id']
+        user = User.objects.get(id=user_id)
+        
+        # Generate new access token
+        new_access_token = str(refresh.access_token)
+        
+        return Response({
+            "success": True,
+            "access": new_access_token
+        })
+        
+    except Exception as e:
+        return Response(
+            {"error": "Invalid refresh token"},
+            status=status.HTTP_401_UNAUTHORIZED
+        )
 
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def logout_user(request):
+    """Logout user (blacklist token)"""
+    try:
+        refresh_token = request.data.get("refresh")
+        token = RefreshToken(refresh_token)
+        token.blacklist()
+        
+        return Response({
+            "success": True,
+            "message": "Successfully logged out"
+        })
+    except Exception as e:
+        return Response({
+            "success": False,
+            "error": str(e)
+        }, status=400)        
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def get_current_user(request):
+    """Get current authenticated user's profile"""
+    user = request.user
+    
+    try:
+        profile = user.userprofile
+    except UserProfile.DoesNotExist:
+        profile = UserProfile.objects.create(user=user, level="beginner")
+    
+    # Get usage statistics
+    tier_limits = profile.get_tier_limits()
+    
+    return Response({
+        "success": True,
+        "user": {
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "first_name": user.first_name,
+            "last_name": user.last_name,
+            "date_joined": user.date_joined,
+            "is_staff": user.is_staff,
+            "is_superuser": user.is_superuser
+        },
+        "profile": {
+            "level": profile.level,
+            "subscription_tier": profile.subscription_tier,
+            "subscription_status": profile.subscription_status,
+            "preferred_provider": profile.preferred_provider,
+            "preferred_model": profile.preferred_model,
+            "has_api_key": profile.has_api_key(),
+            "api_provider_info": profile.get_provider_info()
+        },
+        "usage": {
+            "requests_today": profile.requests_today,
+            "daily_limit": tier_limits['daily_requests'],
+            "tokens_this_month": profile.tokens_this_month,
+            "pdf_analyses_this_month": profile.pdf_analyses_this_month,
+            "data_analyses_this_month": profile.data_analyses_this_month,
+            "monthly_reset_date": profile.monthly_reset_date
+        }
+    })    
 # Add these imports at the top if not already there
 from django.views.decorators.csrf import csrf_exempt
 from django.http import JsonResponse

@@ -32,14 +32,8 @@ SECRET_KEY = 'django-insecure-n1*q3euj_7h2envk^y_pjus!zb3&tom%jyvj)8p3ip1(t0c00&
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-# Remove the https:// from your domain
-ALLOWED_HOSTS = [
-    '127.0.0.1', 
-    'localhost', 
-    '0.0.0.0',
-    'hadsxk-production.up.railway.app',  # NO https://
-    '.railway.app'  # Allow all railway subdomains
-]
+ALLOWED_HOSTS = ['127.0.0.1', 'localhost', '0.0.0.0','https://hadsxk-production.up.railway.app/']
+
 
 # Application definition
 
@@ -109,10 +103,9 @@ if DATABASE_URL:
             default=DATABASE_URL,
             conn_max_age=600,
             conn_health_checks=True,
-            ssl_require=True  # Supabase requires SSL
         )
     }
-    print(f"✅ Connected to Supabase PostgreSQL: {DATABASES['default']['HOST']}")
+    print(f"✅ Connected to Neon PostgreSQL: {DATABASES['default']['HOST']}")
 else:
     DATABASES = {
         'default': {
