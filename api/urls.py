@@ -14,8 +14,8 @@ urlpatterns = [
     path('register/', views.register, name='register'),  # Frontend calls /api/register/
     
     # === AUTH ALIASES (for backward compatibility) ===
-    path('auth/login/', views.login_user, name='login_alt'),
-    path('auth/register/', views.register, name='register_alt'),
+    path('login/', views.login_user, name='login_alt'),
+    path('register/', views.register, name='register_alt'),
     
     # === OTHER AUTH ENDPOINTS ===
     path('logout/', views.logout_user, name='logout'),
