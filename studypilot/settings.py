@@ -328,15 +328,28 @@ LOGGING = {
 
 
 # === SECURITY SETTINGS (for production) ===
+# Disable DRF static files in production
 if not DEBUG:
-    SECURE_SSL_REDIRECT = True
-    SECURE_HSTS_SECONDS = 31536000  # 1 year
-    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
-    SECURE_HSTS_PRELOAD = True
-    SESSION_COOKIE_SECURE = True
-    CSRF_COOKIE_SECURE = True
-    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
-    
+    REST_FRAMEWORK = {
+        'DEFAULT_AUTHENTICATION_CLASSES': (
+            'rest_framework_simplejwt.authentication.JWTAuthentication',
+        ),
+        'DEFAULT_PERMISSION_CLASSES': [
+            'rest_framework.permissions.AllowAny',
+        ],
+        'DEFAULT_RENDERER_CLASSES': (
+            'rest_framework.renderers.JSONRenderer',  # Only JSON in production
+        ),
+    }
+else:
+    REST_FRAMEWORK = {
+        'DEFAULT_AUTHENTICATION_CLASSES': (
+            'rest_framework_simplejwt.authentication.JWTAuthentication',
+        ),
+        'DEFAULT_PERMISSION_CLASSES': [
+            'rest_framework.permissions.AllowAny',
+        ],
+    }
     
     
     
