@@ -71,6 +71,9 @@ from rest_framework.response import Response
 from rest_framework import status
 from .models import UploadedDocument, UserProfile
 from django.db import transaction  # Add this line
+
+
+
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def register(request):
@@ -81,25 +84,40 @@ def register(request):
     reseller_code = request.data.get('reseller_code', None)
     referred_by = request.data.get('referred_by', None)
 
+    print(f"=== REGISTER REQUEST ===")
+    print(f"Username: {username}")
+    print(f"Email: {email}")
+    print(f"Password length: {len(password) if password else 0}")
+    print(f"Raw data: {request.data}")
+
     if not username or not password:
+        print("ERROR: Missing username or password")
         return Response({"error": "Username and password required"}, status=400)
 
-    if User.objects.filter(username=username).exists():
+    # Check if user exists (case-insensitive)
+    if User.objects.filter(username__iexact=username).exists():
+        print(f"ERROR: Username '{username}' already exists")
         return Response({"error": "Username already exists"}, status=400)
 
-    if email and User.objects.filter(email=email).exists():
+    if email and User.objects.filter(email__iexact=email).exists():
+        print(f"ERROR: Email '{email}' already exists")
         return Response({"error": "Email already exists"}, status=400)
 
     try:
         with transaction.atomic():
-            # Create user
+            # Create user with proper password hashing
+            print(f"Creating user '{username}'...")
             user = User.objects.create_user(
                 username=username,
                 password=password,
-                email=email
+                email=email if email else None,
+                is_active=True
             )
+            
+            print(f"User created with ID: {user.id}")
+            print(f"User password hash: {user.password[:50]}...")
 
-            # Use get_or_create to handle existing profile
+            # Get or create profile
             profile, created = UserProfile.objects.get_or_create(
                 user=user,
                 defaults={
@@ -108,12 +126,14 @@ def register(request):
                 }
             )
             
-            # If profile already exists, update it
+            # If profile already exists (unlikely), update it
             if not created:
                 profile.level = level
                 profile.referred_by_code = referred_by
                 profile.save()
             
+            print(f"Profile created/updated: {profile.id}")
+
             # Handle reseller signup if reseller_code provided
             if reseller_code:
                 try:
@@ -126,13 +146,20 @@ def register(request):
                     )
                     profile.reseller_code_used = reseller_code
                     profile.save()
+                    print(f"User enrolled with reseller: {reseller_code}")
                 except Reseller.DoesNotExist:
-                    pass
+                    print(f"Reseller code '{reseller_code}' not found, skipping...")
             
             # Generate JWT tokens
+            print(f"Generating JWT tokens...")
             refresh = RefreshToken.for_user(user)
             
-            return Response({
+            # Manually verify the password works
+            print(f"Verifying password after registration...")
+            test_auth = authenticate(username=username, password=password)
+            print(f"Password verification result: {'SUCCESS' if test_auth else 'FAILED'}")
+
+            response_data = {
                 "message": "User created successfully",
                 "username": user.username,
                 "tier": "free",
@@ -153,15 +180,22 @@ def register(request):
                     "id": user.id,
                     "username": user.username,
                     "email": user.email,
-                    "date_joined": user.date_joined
+                    "date_joined": user.date_joined.strftime('%Y-%m-%dT%H:%M:%SZ')
                 }
-            }, status=201)
+            }
+            
+            print(f"Registration successful! Returning response...")
+            return Response(response_data, status=201)
             
     except Exception as e:
+        import traceback
+        print(f"=== REGISTRATION EXCEPTION ===")
+        print(f"Error: {str(e)}")
+        traceback.print_exc()
         return Response({
-            "error": f"Registration failed: {str(e)}"
+            "error": f"Registration failed: {str(e)}",
+            "details": str(e)
         }, status=400)
-    
     
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -180,24 +214,33 @@ def login_user(request):
             status=status.HTTP_400_BAD_REQUEST
         )
     
-    # DEBUG: Check if user exists
-    print(f"Checking if user '{username}' exists in database...")
-    user_exists = User.objects.filter(username=username).exists()
-    print(f"User exists: {user_exists}")
+    print(f"Attempting authentication for user: {username}")
     
-    if user_exists:
+    # First, check if user exists
+    try:
         user = User.objects.get(username=username)
-        print(f"User details: ID={user.id}, Active={user.is_active}")
-        print(f"Password hash starts with: {user.password[:20]}...")
+        print(f"User found: ID={user.id}, Active={user.is_active}")
         
-        # Try manual password check
+        # Manual password check for debugging
         if user.check_password(password):
-            print("✅ Password check PASSED manually!")
+            print("✅ Password check PASSED")
         else:
-            print("❌ Password check FAILED manually!")
+            print("❌ Password check FAILED")
+            print(f"Stored hash: {user.password[:50]}...")
+            
+    except User.DoesNotExist:
+        # Try case-insensitive lookup
+        try:
+            user = User.objects.get(username__iexact=username)
+            print(f"User found with case-insensitive lookup: {user.username}")
+        except User.DoesNotExist:
+            print(f"❌ User '{username}' not found")
+            return Response(
+                {"error": "Invalid credentials"},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
     
-    # Authenticate user
-    print(f"Attempting Django authenticate for user: {username}")
+    # Authenticate with Django's auth system
     user = authenticate(username=username, password=password)
     
     if user is not None:
@@ -205,8 +248,7 @@ def login_user(request):
         
         # Generate JWT tokens
         refresh = RefreshToken.for_user(user)
-        print(f"Generated tokens - Access: {str(refresh.access_token)[:20]}...")
-        print(f"Generated tokens - Refresh: {str(refresh)[:20]}...")
+        print(f"Generated access token: {str(refresh.access_token)[:20]}...")
         
         # Get or create user profile
         profile, created = UserProfile.objects.get_or_create(
@@ -214,7 +256,8 @@ def login_user(request):
             defaults={'level': 'beginner'}
         )
         
-        print(f"Response being sent: tokens.access exists = {bool(str(refresh.access_token))}")
+        if created:
+            print(f"Created new profile for user")
         
         return Response({
             "success": True,
@@ -225,7 +268,7 @@ def login_user(request):
                 "email": user.email,
                 "first_name": user.first_name,
                 "last_name": user.last_name,
-                "date_joined": user.date_joined.isoformat()
+                "date_joined": user.date_joined.strftime('%Y-%m-%dT%H:%M:%SZ')
             },
             "profile": {
                 "level": profile.level,
@@ -238,10 +281,22 @@ def login_user(request):
             }
         })
     else:
-        print(f"❌ Django authentication FAILED for user: {username}")
-        print(f"Possible reasons: User doesn't exist, password wrong, or user not active")
+        print(f"❌ Authentication FAILED for user: {username}")
+        
+        # More detailed error messages
+        try:
+            user = User.objects.get(username=username)
+            if not user.is_active:
+                error_msg = "Account is disabled"
+            elif not user.check_password(password):
+                error_msg = "Invalid password"
+            else:
+                error_msg = "Authentication failed"
+        except User.DoesNotExist:
+            error_msg = "User does not exist"
+        
         return Response(
-            {"error": "Invalid credentials"},
+            {"error": error_msg},
             status=status.HTTP_401_UNAUTHORIZED
         )
         
