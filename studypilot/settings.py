@@ -101,41 +101,37 @@ WSGI_APPLICATION = 'studypilot.wsgi.application'
 # settings.py - Force SQLite locally
 import os
 from pathlib import Path
-import sys
-# Get DATABASE_URL from environment
-DATABASE_URL = os.environ.get('DATABASE_URL')
 
-# Debug output
-print(f"=== DATABASE CONFIGURATION ===", file=sys.stderr)
-print(f"DATABASE_URL from env: {'Yes' if DATABASE_URL else 'No'}", file=sys.stderr)
+# Get DATABASE_URL from environment
+# === DATABASE CONFIGURATION - SIMPLIFIED ===
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 if DATABASE_URL:
-    # Convert postgres:// to postgresql:// if needed
+    print("🚀 Connecting to Neon PostgreSQL...")
+    
+    # Clean up the URL
     if DATABASE_URL.startswith('postgres://'):
         DATABASE_URL = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
     
-    print(f"Connecting to PostgreSQL/Neon...", file=sys.stderr)
+    # Remove channel_binding parameter as it's not needed
+    if 'channel_binding=require' in DATABASE_URL:
+        DATABASE_URL = DATABASE_URL.replace('&channel_binding=require', '')
     
-    # Parse the DATABASE_URL
     DATABASES = {
-        'default': dj_database_url.parse(
-            DATABASE_URL,
-            conn_max_age=0,  # Important for Neon
-            ssl_require=True,
-        )
+        'default': {
+            'ENGINE': 'django.db.backends.postgresql',
+            'NAME': 'verceldb',
+            'USER': 'default',
+            'PASSWORD': 'AZ1s4miXNlPB',
+            'HOST': 'ep-hidden-base-a40cjxlz.us-east-1.aws.neon.tech',
+            'PORT': 5432,
+            'OPTIONS': {
+                'sslmode': 'require',
+            },
+            'CONN_MAX_AGE': 0,  # Important for Neon
+        }
     }
-    
-    # Add Neon-specific settings
-    DATABASES['default']['ENGINE'] = 'django.db.backends.postgresql'
-    DATABASES['default']['CONN_MAX_AGE'] = 0  # Disable connection pooling
-    
-    print(f"Database engine: {DATABASES['default']['ENGINE']}", file=sys.stderr)
-    print(f"Database name: {DATABASES['default'].get('NAME', 'N/A')}", file=sys.stderr)
-    print(f"Database host: {DATABASES['default'].get('HOST', 'N/A')}", file=sys.stderr)
-    
 else:
-    # Fallback to SQLite for local development
-    print("Using SQLite for local development", file=sys.stderr)
     DATABASES = {
         'default': {
             'ENGINE': 'django.db.backends.sqlite3',
