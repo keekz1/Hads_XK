@@ -26,10 +26,7 @@ python-pptx==0.6.23
 pandas==2.2.0
 numpy==1.26.3
 
-# File Handling
 python-magic==0.4.27
-python-magic-bin==0.4.14
-
 # Authentication & Security
 cryptography==42.0.3
 pyjwt==2.8.0
