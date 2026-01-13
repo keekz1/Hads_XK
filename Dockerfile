@@ -1,25 +1,13 @@
-FROM python:3.11-slim 
- 
-WORKDIR /app 
- 
-COPY requirements.txt . 
-Collecting Django==4.2.7 (from -r requirements.txt (line 2))
-  Downloading Django-4.2.7-py3-none-any.whl.metadata (4.1 kB)
-Collecting djangorestframework==3.14.0 (from -r requirements.txt (line 3))
-  Downloading djangorestframework-3.14.0-py3-none-any.whl.metadata (10 kB)
-Collecting djangorestframework-simplejwt==5.3.0 (from -r requirements.txt (line 4))
-  Downloading djangorestframework_simplejwt-5.3.0-py3-none-any.whl.metadata (4.3 kB)
-Collecting django-cors-headers==4.2.0 (from -r requirements.txt (line 5))
-  Downloading django_cors_headers-4.2.0-py3-none-any.whl.metadata (16 kB)
-Collecting psycopg2-binary==2.9.7 (from -r requirements.txt (line 6))
-  Downloading psycopg2-binary-2.9.7.tar.gz (383 kB)
-  Installing build dependencies: started
-  Installing build dependencies: finished with status 'done'
-  Getting requirements to build wheel: started
-  Getting requirements to build wheel: finished with status 'error'
- 
-COPY . . 
- 
-RUN python manage.py collectstatic --noinput 
- 
-CMD ["sh", "-c", "python manage.py migrate && gunicorn studypilot.wsgi:application --bind 0.0.0.0:$PORT"] 
+﻿FROM python:3.11-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --upgrade pip
+RUN pip install -r requirements.txt
+
+COPY . .
+
+RUN python manage.py collectstatic --noinput
+
+CMD sh -c "python manage.py migrate && gunicorn studypilot.wsgi:application --bind 0.0.0.0:$PORT"
