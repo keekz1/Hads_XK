@@ -75,22 +75,45 @@ class ChatService:
         return None
  # Add this to your ai.py file
 
-def analyze_document_with_ai(document_text, question="", api_key=None, provider="groq", model=None):
+def analyze_document_with_ai(document_text, question="", api_key=None, provider="groq", model=None, user_profile=None):
     """
     Analyze document content using AI
     
     Args:
         document_text: Text extracted from document
         question: Optional question to answer
-        api_key: User's API key
+        api_key: User's API key (optional)
         provider: AI provider ('groq', 'openai', etc.)
         model: Model to use
+        user_profile: UserProfile object for fallback (optional)
     
     Returns:
         dict with analysis results
     """
     # Limit document context to avoid token limits
     context = document_text[:6000] if len(document_text) > 6000 else document_text
+    
+    # If no API key provided but user_profile is given, try to get fallback
+    using_system_fallback = False
+    if not api_key and user_profile:
+        # Try user's key first
+        api_key = user_profile.get_api_key()
+        
+        # If user has no key, try system fallback
+        if not api_key:
+            system_api_key = get_system_fallback_key(provider)
+            if system_api_key:
+                api_key = system_api_key
+                using_system_fallback = True
+                print(f"⚠️ Using system fallback for document analysis")
+    
+    if not api_key:
+        return {
+            "success": False,
+            "error": "API key required for document analysis",
+            "requires_setup": True,
+            "suggestion": f"Please set up your {provider} API key"
+        }
     
     # Create system message
     system_message = """You are an expert document analyzer. Your task is to:
@@ -142,7 +165,8 @@ Provide a detailed analysis covering key points, themes, structure, and signific
             "input_tokens": result["input_tokens"],
             "output_tokens": result["output_tokens"],
             "model": result.get("model", model),
-            "provider": provider
+            "provider": provider,
+            "using_system_fallback": using_system_fallback
         }
         
     except Exception as e:
@@ -150,8 +174,9 @@ Provide a detailed analysis covering key points, themes, structure, and signific
         return {
             "success": False,
             "error": str(e),
-            "analysis": None
-        }   
+            "analysis": None,
+            "using_system_fallback": using_system_fallback
+        }
 @staticmethod
 def calculate_cost(input_tokens, output_tokens, model="llama-3.1-8b-instant", provider="groq"):
     """
@@ -638,25 +663,106 @@ def ask_ai_old(prompt):
         return f"Error: {str(e)[:100]}"
 
 
-# Utility function for views to use
+# Add these imports at the top of your file if not already there
+import os
+from django.conf import settings
+
+# Add this helper function right before proxy_ai_request
+def get_system_fallback_key(provider="groq"):
+    """Get system fallback API key from environment variables"""
+    if provider == "groq":
+        return (
+            os.environ.get('GROQ_API_KEY') or
+            os.environ.get('GROQ_FALLBACK_KEY') or
+            os.environ.get('STUDYPILOT_GROQ_API_KEY') or
+            getattr(settings, 'GROQ_API_KEY', None) or
+            getattr(settings, 'GROQ_FALLBACK_KEY', None)
+        )
+    elif provider == "openai":
+        return (
+            os.environ.get('OPENAI_API_KEY') or
+            os.environ.get('OPENAI_FALLBACK_KEY') or
+            getattr(settings, 'OPENAI_API_KEY', None)
+        )
+    elif provider == "anthropic":
+        return (
+            os.environ.get('ANTHROPIC_API_KEY') or
+            getattr(settings, 'ANTHROPIC_API_KEY', None)
+        )
+    elif provider == "gemini":
+        return (
+            os.environ.get('GEMINI_API_KEY') or
+            getattr(settings, 'GEMINI_API_KEY', None)
+        )
+    return None
+
+
+# Now update the proxy_ai_request function (around line 385)
 def proxy_ai_request(user, prompt, subject=None, difficulty=None, model=None):
     """
     Convenience function for views to make AI requests
     Default: FREE Groq!
+    USES ENVIRONMENT API KEY AS FALLBACK WHEN USER HAS NO KEY
     """
     try:
         profile = user.userprofile
-        api_key = profile.get_api_key()
+        user_api_key = profile.get_api_key()
         provider = profile.preferred_provider
         
+        # Track where the API key comes from
+        api_key = None
+        key_source = "user"
+        using_system_fallback = False
+        
+        # 1. First try user's own API key
+        if user_api_key:
+            api_key = user_api_key
+            key_source = "user"
+            print(f"✅ Using user's own {provider} API key for {user.username}")
+        
+        # 2. If user has no API key, try system fallback
+        elif user_api_key is None:
+            key_source = "system_fallback"
+            using_system_fallback = True
+            
+            # Try to get system fallback key
+            system_api_key = get_system_fallback_key(provider)
+            
+            if system_api_key:
+                api_key = system_api_key
+                print(f"⚠️ Using system fallback {provider} API key for user {user.username}")
+                print(f"   User doesn't have their own API key configured")
+            else:
+                # No system fallback key available either
+                print(f"❌ No API key available for {user.username}")
+                print(f"   User has no key and system has no {provider} fallback key")
+                
+                # Provide helpful setup instructions
+                setup_info = None
+                if provider == "groq":
+                    setup_info = get_groq_setup_instructions(user.email)
+                
+                return {
+                    "success": False,
+                    "error": "API key not configured",
+                    "requires_setup": True,
+                    "provider": provider,
+                    "is_groq": provider == 'groq',
+                    "setup_info": setup_info,
+                    "message": f"Please set up your {provider} API key or contact support"
+                }
+        
+        # At this point, api_key should be set (either user's or system's)
         if not api_key:
             return {
                 "success": False,
-                "error": "API key not configured",
+                "error": "No API key available",
                 "requires_setup": True,
                 "provider": provider,
                 "is_groq": provider == 'groq'
             }
+        
+        print(f"🔑 Key source: {key_source}, Provider: {provider}, Model: {model or profile.preferred_model}")
         
         conversation = [{"role": "user", "content": prompt}]
         
@@ -670,18 +776,38 @@ def proxy_ai_request(user, prompt, subject=None, difficulty=None, model=None):
             model=model or profile.preferred_model
         )
         
+        # Add metadata about the key source
         result["success"] = True
+        result["key_source"] = key_source
+        result["using_system_fallback"] = using_system_fallback
+        result["user_has_own_key"] = (key_source == "user")
+        
+        # Add free tier info for Groq
+        if provider == "groq":
+            result["is_free"] = True
+            result["free_tier_info"] = "5,000,000 tokens/month free"
+        
         return result
         
     except Exception as e:
+        error_msg = str(e)
+        print(f"AI request error for {user.username}: {error_msg}")
+        
+        # Check if profile exists in exception context
+        profile = None
+        try:
+            profile = user.userprofile
+        except:
+            pass
+        
         return {
             "success": False,
-            "error": str(e),
-            "requires_setup": "invalid" in str(e).lower() or "key" in str(e).lower(),
-            "provider": getattr(profile, 'preferred_provider', 'groq'),
-            "is_groq": getattr(profile, 'preferred_provider', 'groq') == 'groq'
+            "error": error_msg,
+            "requires_setup": "invalid" in error_msg.lower() or "key" in error_msg.lower() or "authentication" in error_msg.lower(),
+            "provider": getattr(profile, 'preferred_provider', 'groq') if profile else 'groq',
+            "is_groq": getattr(profile, 'preferred_provider', 'groq') == 'groq' if profile else True,
+            "suggestion": "Try setting up your own Groq API key (FREE!) at https://console.groq.com/signup"
         }
-
 
 # Test function for development
 def test_api_connection(api_key, provider="groq"):
