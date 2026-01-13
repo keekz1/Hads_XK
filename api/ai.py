@@ -6,7 +6,8 @@ import requests
 from django.conf import settings
 from decimal import Decimal
 import time
-import groq  # Groq Python SDK - don't import Groq directly
+import groq # Groq Python SDK
+
 # Initialize Redis for caching (optional)
 def get_redis_client():
     """Get Redis client with fallback"""
@@ -214,7 +215,7 @@ def call_groq_api(api_key, messages, model="llama-3.1-8b-instant", max_tokens=20
     """
     try:
         # Initialize Groq client with USER'S key
-        client = Groq(api_key=api_key)
+        client = groq.Groq(api_key=api_key)
         
         # Prepare messages for Groq
         # Groq doesn't have system messages, so prepend to first user message
