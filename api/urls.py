@@ -3,6 +3,8 @@
 from django.urls import path
 from . import views
 from rest_framework_simplejwt.views import TokenObtainPairView
+from .health import health_check
+
 urlpatterns = [
     # === USER AUTHENTICATION ===
     path('register/', views.register, name='register'),
@@ -13,7 +15,8 @@ urlpatterns = [
     path('documents/', views.get_user_documents, name='get_user_documents'),
     path('documents/<int:document_id>/delete/', views.delete_document, name='delete_document'),
 path('analyze-document/', views.analyze_document, name='analyze_document'),  # Add this line
-     
+         path('health/', health_check, name='health_check'),
+
     # === AI CHAT ===
     path('ai-chat/', views.ai_study_helper, name='ai_study_helper'),
     path('conversations/', views.AIConversationList.as_view(), name='ai_conversations'),
