@@ -73,7 +73,6 @@ from .models import UploadedDocument, UserProfile
 from django.db import transaction  # Add this line
 
 
-
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def register(request):
@@ -88,7 +87,6 @@ def register(request):
     print(f"Username: {username}")
     print(f"Email: {email}")
     print(f"Password length: {len(password) if password else 0}")
-    print(f"Raw data: {request.data}")
 
     if not username or not password:
         print("ERROR: Missing username or password")
@@ -115,7 +113,6 @@ def register(request):
             )
             
             print(f"User created with ID: {user.id}")
-            print(f"User password hash: {user.password[:50]}...")
 
             # Get or create profile
             profile, created = UserProfile.objects.get_or_create(
@@ -126,7 +123,6 @@ def register(request):
                 }
             )
             
-            # If profile already exists (unlikely), update it
             if not created:
                 profile.level = level
                 profile.referred_by_code = referred_by
@@ -150,18 +146,19 @@ def register(request):
                 except Reseller.DoesNotExist:
                     print(f"Reseller code '{reseller_code}' not found, skipping...")
             
-            # Generate JWT tokens
-            print(f"Generating JWT tokens...")
-            refresh = RefreshToken.for_user(user)
+            # **REMOVED: DO NOT generate JWT tokens here**
+            # This is the key change - no tokens on registration
             
-            # Manually verify the password works
-            print(f"Verifying password after registration...")
+            # **ADD: Simple verification that user was created**
+            print(f"Testing authentication for verification...")
             test_auth = authenticate(username=username, password=password)
-            print(f"Password verification result: {'SUCCESS' if test_auth else 'FAILED'}")
+            print(f"Verification result: {'SUCCESS' if test_auth else 'FAILED'}")
 
             response_data = {
-                "message": "User created successfully",
+                "success": True,
+                "message": "User created successfully. Please log in.",
                 "username": user.username,
+                "email": user.email,
                 "tier": "free",
                 "daily_requests_limit": profile.get_tier_limits()['daily_requests'],
                 "requires_api_key": True,
@@ -171,20 +168,22 @@ def register(request):
                     "3. Start using AI study assistance"
                 ],
                 "reseller_enrolled": bool(reseller_code),
-                # Add JWT tokens to response
-                "tokens": {
-                    "refresh": str(refresh),
-                    "access": str(refresh.access_token),
-                },
+                # **REMOVED: 'tokens' field**
+                # **ADD: user info without sensitive data**
                 "user": {
                     "id": user.id,
                     "username": user.username,
                     "email": user.email,
                     "date_joined": user.date_joined.strftime('%Y-%m-%dT%H:%M:%SZ')
+                },
+                # **ADD: Instructions for next step**
+                "next_steps": {
+                    "login_url": "/api/login/",
+                    "message": "Registration successful! Please log in with your credentials."
                 }
             }
             
-            print(f"Registration successful! Returning response...")
+            print(f"Registration successful! User created but NOT logged in.")
             return Response(response_data, status=201)
             
     except Exception as e:
