@@ -32,14 +32,22 @@ SECRET_KEY = 'django-insecure-n1*q3euj_7h2envk^y_pjus!zb3&tom%jyvj)8p3ip1(t0c00&
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['127.0.0.1', 'https://kbytexfrontend.vercel.app/', '0.0.0.0', '.up.railway.app', 'hadsxk-production.up.railway.app']
+ALLOWED_HOSTS = [
+    '127.0.0.1', 
+    'localhost', 
+    '0.0.0.0', 
+    '.up.railway.app', 
+    'hadsxk-production.up.railway.app',
+    'kbytexfrontend.vercel.app',  # Add this WITHOUT https://
+    '.vercel.app',  # This allows ALL vercel domains
+]
 CSRF_TRUSTED_ORIGINS = [
     'https://hadsxk-production.up.railway.app',
     'https://*.railway.app',
     'https://*.up.railway.app',
-    'https://kbytexfrontend.vercel.app' ,
+    'https://kbytexfrontend.vercel.app',  # Add this
+    'https://*.vercel.app',  # This allows ALL vercel domains
 ]
-
 # Application definition
 
 INSTALLED_APPS = [
@@ -185,12 +193,15 @@ MEDIA_ROOT = BASE_DIR / 'media'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
+
 # === CORS SETTINGS ===
 CORS_ALLOWED_ORIGINS = [
     'https://hadsxk-production.up.railway.app',
     'http://localhost:3000',
     'http://127.0.0.1:3000',
+    'https://kbytexfrontend.vercel.app',  # Add this
 ]
+
 
 CORS_ALLOW_CREDENTIALS = True
 CORS_ALLOW_METHODS = [
