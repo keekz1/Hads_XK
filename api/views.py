@@ -180,27 +180,41 @@ def login_user(request):
             status=status.HTTP_400_BAD_REQUEST
         )
     
+    # DEBUG: Check if user exists
+    print(f"Checking if user '{username}' exists in database...")
+    user_exists = User.objects.filter(username=username).exists()
+    print(f"User exists: {user_exists}")
+    
+    if user_exists:
+        user = User.objects.get(username=username)
+        print(f"User details: ID={user.id}, Active={user.is_active}")
+        print(f"Password hash starts with: {user.password[:20]}...")
+        
+        # Try manual password check
+        if user.check_password(password):
+            print("✅ Password check PASSED manually!")
+        else:
+            print("❌ Password check FAILED manually!")
+    
     # Authenticate user
-    print(f"Attempting to authenticate user: {username}")
+    print(f"Attempting Django authenticate for user: {username}")
     user = authenticate(username=username, password=password)
     
     if user is not None:
-        print(f"User authenticated successfully: {user.username}")
+        print(f"✅ Django authentication SUCCESSFUL for: {user.username}")
+        
         # Generate JWT tokens
         refresh = RefreshToken.for_user(user)
+        print(f"Generated tokens - Access: {str(refresh.access_token)[:20]}...")
+        print(f"Generated tokens - Refresh: {str(refresh)[:20]}...")
         
-        # Get or create user profile using get_or_create
+        # Get or create user profile
         profile, created = UserProfile.objects.get_or_create(
             user=user,
             defaults={'level': 'beginner'}
         )
         
-        if created:
-            print(f"Created new user profile for {user.username}")
-        else:
-            print(f"User profile found: {profile.level}")
-        
-        print(f"Returning tokens for user: {user.username}")
+        print(f"Response being sent: tokens.access exists = {bool(str(refresh.access_token))}")
         
         return Response({
             "success": True,
@@ -211,7 +225,7 @@ def login_user(request):
                 "email": user.email,
                 "first_name": user.first_name,
                 "last_name": user.last_name,
-                "date_joined": user.date_joined
+                "date_joined": user.date_joined.isoformat()
             },
             "profile": {
                 "level": profile.level,
@@ -224,7 +238,8 @@ def login_user(request):
             }
         })
     else:
-        print(f"Authentication failed for user: {username}")
+        print(f"❌ Django authentication FAILED for user: {username}")
+        print(f"Possible reasons: User doesn't exist, password wrong, or user not active")
         return Response(
             {"error": "Invalid credentials"},
             status=status.HTTP_401_UNAUTHORIZED
