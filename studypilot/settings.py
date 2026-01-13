@@ -97,27 +97,21 @@ WSGI_APPLICATION = 'studypilot.wsgi.application'
 import os
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-
+ 
 DATABASE_URL = os.environ.get('DATABASE_URL')
 
-if DATABASE_URL:
-    DATABASES = {
-        'default': dj_database_url.config(
-            default=DATABASE_URL,
-            conn_max_age=600,
-            conn_health_checks=True,
-        )
-    }
-    print(f"✅ Connected to Neon PostgreSQL: {DATABASES['default']['HOST']}")
-else:
-    DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': BASE_DIR / 'db.sqlite3',
-        }
-    }
-    print("⚠️ Using SQLite - DATABASE_URL not set")
+# Always prioritize DATABASE_URL if it exists
+if DATABASE_URL and DATABASE_URL.startswith('postgres://'):
+    # Convert postgres:// to postgresql:// for dj_database_url
+    DATABASE_URL = DATABASE_URL.replace('postgres://', 'postgresql://', 1)
+    
+DATABASES = {
+    'default': dj_database_url.config(
+        default=DATABASE_URL if DATABASE_URL else 'sqlite:///db.sqlite3',
+        conn_max_age=600,
+        conn_health_checks=True,
+    )
+}
 
 # For production, Railway will override this with DATABASE_URL
 # Don't try to connect to Supabase locally
