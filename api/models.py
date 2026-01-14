@@ -453,7 +453,7 @@ class AIConversation(models.Model):
     subject = models.CharField(max_length=100)
     difficulty = models.CharField(max_length=50)
     created_at = models.DateTimeField(auto_now_add=True)
-    
+ 
     # Add this new field:
     key_source = models.CharField(max_length=50, default='user', choices=[
         ('user', 'User API Key'),
@@ -462,6 +462,11 @@ class AIConversation(models.Model):
     ], help_text="Source of the API key used for this request")
     
     # User's cost tracking
+    
+    is_image_generation = models.BooleanField(default=False)
+    image_generation_failed = models.BooleanField(default=False)
+    image_url = models.URLField(max_length=500, blank=True, null=True)
+    image_prompt = models.TextField(blank=True, null=True)
     model_used = models.CharField(max_length=100, default="llama-3.1-8b-instant")
     input_tokens = models.IntegerField(default=0)
     output_tokens = models.IntegerField(default=0)
