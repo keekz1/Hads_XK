@@ -296,7 +296,9 @@ GROQ_FALLBACK_KEY = os.getenv("GROQ_FALLBACK_KEY", "")
 OPENAI_FALLBACK_KEY = os.getenv("OPENAI_FALLBACK_KEY", "")
 
 # You may also want to add:
-STABILITY_API_KEY = os.getenv("STABILITY_API_KEY", "")  # For Stability AI
+# Temporary for testing - replace with real key from env
+STABILITY_API_KEY = os.getenv("STABILITY_API_KEY", "sk-VluUnzOV42RRTJTkTMUhuAQDCoryYqXLTcoguPQtosRGsuTn")
+
 DALL_E_API_KEY = os.getenv("DALL_E_API_KEY", "")  # For DALL-E if you want to add it later
 # === REDIS CONFIGURATION ===
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
