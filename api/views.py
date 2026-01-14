@@ -12,7 +12,7 @@ from django.http import JsonResponse  # ADD THIS
 import logging
 from django.views.decorators.csrf import csrf_exempt
 from django.http import JsonResponse
-from .ai import proxy_ai_request_with_images, analyze_document_with_ai
+from .ai import proxy_ai_request_with_images, analyze_document_with_ai ,  generate_image_with_replicate_ap
 # Django REST Framework imports
 from rest_framework.decorators import api_view, authentication_classes, permission_classes, parser_classes
 from rest_framework.authentication import SessionAuthentication, TokenAuthentication
@@ -1238,7 +1238,6 @@ def ai_study_helper(request):
             "error_type": type(e).__name__
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
-        
 @api_view(['POST'])
 @authentication_classes([JWTAuthentication, SessionAuthentication])
 @permission_classes([IsAuthenticated])
@@ -1347,7 +1346,7 @@ def generate_ai_image(request):
             "success": False,
             "error": f"Image generation failed: {str(e)}",
             "suggestion": "Try a different prompt or try again later",
-            "traceback": str(e) if DEBUG else None
+            "traceback": str(e) if settings.DEBUG else None
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
 @api_view(["POST"])
