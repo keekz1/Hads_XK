@@ -12,8 +12,9 @@ from django.http import JsonResponse  # ADD THIS
 import logging
 from django.views.decorators.csrf import csrf_exempt
 from django.http import JsonResponse
-from .ai import proxy_ai_request_with_images, analyze_document_with_ai ,  generate_image_with_replicate_ap
-# Django REST Framework imports
+# CORRECT: This is the right import
+# CORRECT: This is the right import
+from .ai import proxy_ai_request_with_images, analyze_document_with_ai 
 from rest_framework.decorators import api_view, authentication_classes, permission_classes, parser_classes
 from rest_framework.authentication import SessionAuthentication, TokenAuthentication
 from rest_framework.permissions import AllowAny, IsAuthenticated
