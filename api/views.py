@@ -1568,26 +1568,9 @@ def ai_study_helper(request):
 
         if not hf_token:
             print("❌ HuggingFace API token missing")
-
-            answer = "Image generation is currently unavailable. Please try again later."
-
-            AIConversation.objects.create(
-                user=request.user,
-                prompt=prompt,
-                response=answer,
-                subject="Image Generation (Failed)",
-                difficulty=difficulty,
-                user_tier_at_time=profile.subscription_tier,
-                api_provider="huggingface",
-                is_image_generation=True,
-                image_generation_failed=True
-            )
-
-            profile.record_request(tokens=50)
-
             return Response({
                 "success": False,
-                "answer": answer,
+                "answer": "Image generation is currently unavailable. Please try again later.",
                 "image_generation_failed": True
             }, status=503)
 
@@ -1606,9 +1589,9 @@ def ai_study_helper(request):
                 "inputs": image_prompt,
                 "parameters": {
                     "negative_prompt": "blurry, low quality, distorted, watermark, ugly",
-                    "width": 1024,
-                    "height": 1024,
-                    "num_inference_steps": 25,
+                    "width": 768,  # Reduced for faster generation
+                    "height": 768,
+                    "num_inference_steps": 20,
                     "guidance_scale": 7.5
                 },
                 "options": {
@@ -1617,23 +1600,46 @@ def ai_study_helper(request):
                 }
             }
             
+            # Log what we're sending
+            print(f"📤 Sending request to HuggingFace API...")
+            print(f"   Model: {model_id}")
+            print(f"   Prompt: {image_prompt}")
+            
             response = requests.post(api_url, headers=headers, json=payload, timeout=60)
             response_time = int((time.time() - start_time) * 1000)
+            
+            print(f"📥 Response status: {response.status_code}")
+            print(f"📥 Response time: {response_time}ms")
 
             if response.status_code == 200:
                 # Save image locally
                 image_data = response.content
                 filename = f"generated_{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
                 filepath = os.path.join(settings.MEDIA_ROOT, 'generated_images', filename)
-                os.makedirs(os.path.dirname(filepath), exist_ok=True)
                 
-                with open(filepath, 'wb') as f:
-                    f.write(image_data)
+                # Ensure directory exists
+                try:
+                    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+                except Exception as e:
+                    print(f"⚠️ Error creating directory: {e}")
+                    # Try to create the media root if it doesn't exist
+                    os.makedirs(settings.MEDIA_ROOT, exist_ok=True)
+                    os.makedirs(os.path.join(settings.MEDIA_ROOT, 'generated_images'), exist_ok=True)
                 
-                image_url = f"{settings.MEDIA_URL}generated_images/{filename}"
-                print(f"✅ Image generated: {image_url}")
+                # Save image
+                try:
+                    with open(filepath, 'wb') as f:
+                        f.write(image_data)
+                    
+                    # Get relative URL
+                    from django.conf import settings
+                    base_url = request.build_absolute_uri('/')[:-1]
+                    image_url = f"{base_url}{settings.MEDIA_URL}generated_images/{filename}"
+                    
+                    print(f"✅ Image saved: {filepath}")
+                    print(f"✅ Image URL: {image_url}")
 
-                answer = f"""
+                    answer = f"""
 🎨 **Image Generated Successfully**
 
 **Prompt:** {prompt}
@@ -1641,56 +1647,116 @@ def ai_study_helper(request):
 ![Generated Image]({image_url})
 
 **Image URL:** {image_url}
+
+*Tip: Click the image to view full size. Right-click to save.*
 """
 
-                AIConversation.objects.create(
-                    user=request.user,
-                    prompt=prompt,
-                    response=answer,
-                    subject="Image Generation",
-                    difficulty=difficulty,
-                    user_tier_at_time=profile.subscription_tier,
-                    model_used=model_id,
-                    api_provider="huggingface",
-                    is_image_generation=True,
-                    image_url=image_url,
-                    image_prompt=image_prompt,
-                    response_time_ms=response_time
-                )
+                    # Create conversation record
+                    conversation_data = {
+                        'user': request.user,
+                        'prompt': prompt,
+                        'response': answer,
+                        'subject': "Image Generation",
+                        'difficulty': difficulty,
+                        'user_tier_at_time': profile.subscription_tier,
+                        'model_used': model_id,
+                        'api_provider': "huggingface",
+                        'response_time_ms': response_time,
+                    }
+                    
+                    # Add image fields if they exist in the model
+                    try:
+                        if hasattr(AIConversation, 'is_image_generation'):
+                            conversation_data['is_image_generation'] = True
+                        if hasattr(AIConversation, 'image_url'):
+                            conversation_data['image_url'] = image_url
+                        if hasattr(AIConversation, 'image_prompt'):
+                            conversation_data['image_prompt'] = image_prompt
+                    except Exception as e:
+                        print(f"⚠️ Error setting image fields: {e}")
+                    
+                    conversation = AIConversation.objects.create(**conversation_data)
+                    print(f"✅ Conversation logged: {conversation.id}")
 
-                profile.record_request(tokens=150)
+                    profile.record_request(tokens=150)
 
-                return Response({
-                    "success": True,
-                    "answer": answer,
-                    "image_generated": True,
-                    "image_url": image_url,
-                    "response_time_ms": response_time
-                })
+                    return Response({
+                        "success": True,
+                        "answer": answer,
+                        "image_generated": True,
+                        "image_url": image_url,
+                        "response_time_ms": response_time
+                    })
+                    
+                except Exception as e:
+                    print(f"❌ Error saving image: {e}")
+                    return Response({
+                        "success": False,
+                        "error": "Failed to save image",
+                        "details": str(e)[:100]
+                    }, status=500)
                 
             elif response.status_code == 503:
-                # Model loading
-                estimated_time = response.json().get("estimated_time", 30)
+                # Model is loading
+                try:
+                    error_data = response.json()
+                    estimated_time = error_data.get("estimated_time", 30)
+                    print(f"⚠️ Model loading: {estimated_time}s")
+                    
+                    return Response({
+                        "success": False,
+                        "error": "Model is currently loading",
+                        "message": f"The AI model is loading. Please try again in {estimated_time} seconds.",
+                        "estimated_time": estimated_time
+                    }, status=503)
+                except:
+                    return Response({
+                        "success": False,
+                        "error": "Model is loading",
+                        "message": "The AI model is currently loading. Please try again in 30 seconds."
+                    }, status=503)
+                
+            elif response.status_code == 401:
+                print("❌ Invalid HuggingFace token")
                 return Response({
                     "success": False,
-                    "error": "Model is loading",
-                    "estimated_time": estimated_time
-                }, status=503)
+                    "error": "Invalid API token",
+                    "message": "The HuggingFace API token is invalid or expired."
+                }, status=401)
+                
+            elif response.status_code == 400:
+                print(f"❌ Bad request: {response.text[:200]}")
+                return Response({
+                    "success": False,
+                    "error": "Invalid request",
+                    "details": response.text[:200]
+                }, status=400)
                 
             else:
-                error_msg = response.json().get("error", f"API error: {response.status_code}")
+                print(f"❌ API error {response.status_code}: {response.text[:200]}")
                 return Response({
                     "success": False,
-                    "error": "Image generation failed",
-                    "details": error_msg
+                    "error": f"API error {response.status_code}",
+                    "details": response.text[:200]
                 }, status=500)
 
+        except requests.exceptions.Timeout:
+            print("❌ Request timeout")
+            return Response({
+                "success": False,
+                "error": "Request timeout",
+                "message": "The image generation request timed out. Please try again."
+            }, status=504)
+            
         except Exception as e:
-            print("❌ HuggingFace error:", str(e))
+            print(f"❌ Unexpected error: {e}")
+            import traceback
+            traceback.print_exc()
+            
             return Response({
                 "success": False,
                 "error": "Image generation failed",
-                "details": str(e)
+                "details": str(e)[:200]
             }, status=500)
 
     # ================= NORMAL AI CHAT =================
@@ -1737,39 +1803,59 @@ def ai_study_helper(request):
         "max_tokens": 2000
     }
 
-    response = requests.post(url, headers=headers, json=payload, timeout=30)
-    response_data = response.json()
-    response_time = int((time.time() - start_time) * 1000)
+    try:
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        response_data = response.json()
+        response_time = int((time.time() - start_time) * 1000)
 
-    if response.status_code != 200:
+        if response.status_code != 200:
+            print(f"❌ API error: {response.status_code}")
+            print(f"Error details: {response_data}")
+            return Response({
+                "success": False,
+                "error": response_data
+            }, status=response.status_code)
+
+        answer = response_data["choices"][0]["message"]["content"]
+
+        AIConversation.objects.create(
+            user=request.user,
+            prompt=prompt,
+            response=answer,
+            subject=subject,
+            difficulty=difficulty,
+            user_tier_at_time=profile.subscription_tier,
+            model_used=model,
+            api_provider=profile.preferred_provider,
+            response_time_ms=response_time
+        )
+
+        profile.record_request(tokens=200)
+
+        return Response({
+            "success": True,
+            "answer": answer,
+            "provider": profile.preferred_provider,
+            "using_fallback": using_system_fallback,
+            "response_time_ms": response_time
+        })
+        
+    except requests.exceptions.Timeout:
         return Response({
             "success": False,
-            "error": response_data
-        }, status=response.status_code)
-
-    answer = response_data["choices"][0]["message"]["content"]
-
-    AIConversation.objects.create(
-        user=request.user,
-        prompt=prompt,
-        response=answer,
-        subject=subject,
-        difficulty=difficulty,
-        user_tier_at_time=profile.subscription_tier,
-        model_used=model,
-        api_provider=profile.preferred_provider,
-        response_time_ms=response_time
-    )
-
-    profile.record_request(tokens=200)
-
-    return Response({
-        "success": True,
-        "answer": answer,
-        "provider": profile.preferred_provider,
-        "using_fallback": using_system_fallback,
-        "response_time_ms": response_time
-    })
+            "error": "Request timeout",
+            "message": "The request took too long. Please try again."
+        }, status=504)
+        
+    except Exception as e:
+        print(f"❌ Chat error: {e}")
+        import traceback
+        traceback.print_exc()
+        return Response({
+            "success": False,
+            "error": "Chat request failed",
+            "details": str(e)[:200]
+        }, status=500)
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
