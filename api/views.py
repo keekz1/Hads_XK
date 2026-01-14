@@ -7,7 +7,12 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.core.files.storage import default_storage
 from django.conf import settings
-
+from django.views.decorators.csrf import csrf_exempt  # ADD THIS
+from django.http import JsonResponse  # ADD THIS
+import logging
+from django.views.decorators.csrf import csrf_exempt
+from django.http import JsonResponse
+from .ai import proxy_ai_request_with_images, analyze_document_with_ai
 # Django REST Framework imports
 from rest_framework.decorators import api_view, authentication_classes, permission_classes, parser_classes
 from rest_framework.authentication import SessionAuthentication, TokenAuthentication
@@ -32,11 +37,9 @@ import os
 import time
 import json
 import uuid
-import logging
 import traceback
 import requests
-# Add this import at the top of your views.py
-from .ai import proxy_ai_request_with_images, analyze_document_with_ai
+
 # Local imports
 from .models import (
     UserProfile, StudyContent, AIConversation, 
@@ -50,6 +53,7 @@ from .serializers import (
     AIConversationSerializer, ResellerSerializer,
     UploadedDocumentSerializer
 )
+from .ai import proxy_ai_request_with_images, analyze_document_with_ai  # ADD THIS
 
 logger = logging.getLogger(__name__)
 
@@ -283,13 +287,20 @@ def login_user(request):
         
 @csrf_exempt
 def generate_image(request):
+    """Legacy image generation endpoint (for backward compatibility)"""
     if request.method == "POST":
         try:
             data = json.loads(request.body)
             prompt = data.get("prompt", "")
             
             # Get token from settings
-            api_token = settings.REPLICATE_API_TOKEN
+            api_token = getattr(settings, 'REPLICATE_API_TOKEN', None)
+            
+            if not api_token:
+                return JsonResponse({
+                    "success": False,
+                    "error": "Replicate API token not configured"
+                }, status=500)
             
             # Call Replicate
             output = replicate.run(
@@ -310,7 +321,6 @@ def generate_image(request):
             }, status=500)
     
     return JsonResponse({"error": "Method not allowed"}, status=405)
-        
         
         
 @api_view(['POST'])
@@ -443,6 +453,7 @@ def analyze_document(request):
             {'error': f'Analysis failed: {str(e)}'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+        
 @api_view(['POST'])
 @permission_classes([AllowAny])
 def refresh_token(request):
@@ -536,13 +547,6 @@ def get_current_user(request):
             "monthly_reset_date": profile.monthly_reset_date
         }
     })    
-# Add these imports at the top if not already there
-from django.views.decorators.csrf import csrf_exempt
-from django.http import JsonResponse
-import logging
-
-# Set up logger
-logger = logging.getLogger(__name__)
 
 # Add this simple test endpoint first
 @csrf_exempt
@@ -743,9 +747,6 @@ def upload_document(request):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
-# Add this import
-from django.http import JsonResponse
-
 @api_view(['GET'])
 @authentication_classes([JWTAuthentication])  # Use JWTAuthentication since that's what you fixed
 @permission_classes([IsAuthenticated])
@@ -822,310 +823,6 @@ def delete_document(request, document_id):
             {'error': f'Deletion failed: {str(e)}'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
-from .ai import proxy_ai_request, ask_ai  # Add this import at the top
-
-@api_view(['POST'])
-@authentication_classes([JWTAuthentication, SessionAuthentication])
-@permission_classes([IsAuthenticated])
-def analyze_document(request):
-    """Analyze an uploaded document with AI using user's API key or fallback"""
-    print(f"Analyze document called by user: {request.user.username}")
-    
-    try:
-        document_id = request.data.get('document_id')
-        question = request.data.get('question', '')
-        
-        if not document_id:
-            print("ERROR: No document_id provided")
-            return Response(
-                {'error': 'Document ID required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Get document
-        try:
-            document = UploadedDocument.objects.get(id=document_id, user=request.user)
-            print(f"Found document: {document.file_name}")
-        except UploadedDocument.DoesNotExist:
-            print(f"ERROR: Document {document_id} not found for user {request.user.username}")
-            return Response(
-                {'error': 'Document not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-        
-        if not document.extracted_text:
-            print(f"ERROR: Document {document_id} has no extracted text")
-            return Response(
-                {'error': 'Document has no extracted text'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Get user profile
-        profile = request.user.userprofile
-        
-        # Check PDF analysis limits
-        try:
-            tier_limits = profile.get_tier_limits()
-            if profile.pdf_analyses_this_month >= tier_limits.get('pdf_limit', 0):
-                return Response({
-                    'error': 'PDF analysis limit reached',
-                    'limit': tier_limits.get('pdf_limit', 0),
-                    'used': profile.pdf_analyses_this_month,
-                    'upgrade_url': '/plans/'
-                }, status=status.HTTP_402_PAYMENT_REQUIRED)
-        except AttributeError as e:
-            print(f"WARNING: get_tier_limits() not found: {e}")
-            # Use default limits
-            tier_limits = {'pdf_limit': 3}
-        
-        # === GET API KEY ===
-        api_key = None
-        key_source = "user"
-        using_system_fallback = False
-        
-        # 1. Try to get user's API key first
-        api_key = profile.get_api_key()
-        
-        # 2. If user has no API key, use YOUR fallback API key from env
-        if not api_key:
-            key_source = "system_fallback"
-            using_system_fallback = True
-            
-            # Use Groq fallback (FREE!)
-            api_key = (
-                os.environ.get('GROQ_API_KEY') or
-                os.environ.get('GROQ_FALLBACK_KEY') or
-                os.environ.get('STUDYPILOT_GROQ_API_KEY')
-            )
-            
-            if api_key:
-                print(f"Using SYSTEM fallback Groq API key from environment")
-                provider = 'groq'
-                model = 'llama-3.1-8b-instant'
-            else:
-                # If no system key either, ask user to set up
-                return Response({
-                    "success": False,
-                    "error": "API key not configured",
-                    "setup_required": True,
-                    "message": "Please set up your Groq API key (FREE) in your profile",
-                    "setup_url": "/profile/api-setup/",
-                    "using_system_fallback": False
-                }, status=status.HTTP_402_PAYMENT_REQUIRED)
-        else:
-            # User has their own API key
-            provider = profile.preferred_provider
-            model = profile.preferred_model
-        
-        print(f"Using provider: {provider}, Model: {model}, Key source: {key_source}")
-        
-        # Prepare document context (limit tokens)
-        document_context = document.extracted_text[:8000]  # Limit context
-        
-        # Create prompt based on whether question is provided
-        if question:
-            prompt = f"""Analyze this document and answer the following question.
-
-DOCUMENT:
-{document_context}
-
-QUESTION: {question}
-
-Instructions:
-1. Answer based ONLY on the document content
-2. If the information isn't in the document, say "The document doesn't contain information about this"
-3. Be specific and cite relevant parts of the document
-4. If the question is complex, break it down into parts
-
-ANSWER:"""
-        else:
-            prompt = f"""Please analyze this document comprehensively:
-
-DOCUMENT:
-{document_context}
-
-Provide a detailed analysis with the following sections:
-1. **Summary**: 2-3 paragraph overview
-2. **Key Topics**: Main subjects and themes covered
-3. **Important Points**: Significant findings, data, or arguments
-4. **Structure**: How the document is organized
-5. **Purpose & Audience**: Who it's for and why it was created
-6. **Recommendations**: If applicable, suggestions based on the content
-
-ANALYSIS:"""
-        
-        print(f"Sending request to {provider} API...")
-        print(f"Document context length: {len(document_context)} chars")
-        print(f"Prompt length: {len(prompt)} chars")
-        
-        # Prepare conversation for AI
-        conversation = [
-            {
-                "role": "system", 
-                "content": "You are an expert document analyzer. Analyze documents thoroughly and provide detailed, accurate analysis based ONLY on the document content provided."
-            },
-            {
-                "role": "user",
-                "content": prompt
-            }
-        ]
-        
-        # Make the API call using your ai.py
-        start_time = time.time()
-        
-        try:
-            from .ai import ask_ai_with_provider
-            
-            # Call the AI using your ai.py functions
-            ai_result = ask_ai_with_provider(
-                api_key=api_key,
-                provider=provider,
-                messages=conversation,
-                model=model,
-                max_tokens=2500,
-                temperature=0.3
-            )
-            
-            response_time = int((time.time() - start_time) * 1000)
-            
-            analysis_text = ai_result["answer"]
-            input_tokens = ai_result["input_tokens"]
-            output_tokens = ai_result["output_tokens"]
-            total_tokens = ai_result["total_tokens"]
-            
-            print(f"Analysis completed: {len(analysis_text)} chars, {total_tokens} tokens")
-            
-        except Exception as ai_error:
-            # Fallback to direct API call if ai.py fails
-            print(f"ai.py call failed, falling back to direct API: {ai_error}")
-            
-            # Direct API call as fallback
-            if provider == 'groq':
-                url = "https://api.groq.com/openai/v1/chat/completions"
-                headers = {
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json"
-                }
-                payload = {
-                    "model": model,
-                    "messages": conversation,
-                    "max_tokens": 2500,
-                    "temperature": 0.3
-                }
-                response = requests.post(url, headers=headers, json=payload, timeout=60)
-                response_data = response.json()
-                analysis_text = response_data['choices'][0]['message']['content']
-                tokens = response_data.get('usage', {})
-                input_tokens = tokens.get('prompt_tokens', 0)
-                output_tokens = tokens.get('completion_tokens', 0)
-                total_tokens = tokens.get('total_tokens', 0)
-                response_time = int((time.time() - start_time) * 1000)
-            
-            elif provider == 'openai':
-                url = "https://api.openai.com/v1/chat/completions"
-                headers = {
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json"
-                }
-                payload = {
-                    "model": model,
-                    "messages": conversation,
-                    "max_tokens": 2500,
-                    "temperature": 0.3
-                }
-                response = requests.post(url, headers=headers, json=payload, timeout=60)
-                response_data = response.json()
-                analysis_text = response_data['choices'][0]['message']['content']
-                tokens = response_data.get('usage', {})
-                input_tokens = tokens.get('prompt_tokens', 0)
-                output_tokens = tokens.get('completion_tokens', 0)
-                total_tokens = tokens.get('total_tokens', 0)
-                response_time = int((time.time() - start_time) * 1000)
-            
-            else:
-                raise Exception(f"Provider {provider} not supported in fallback")
-        
-        # Update PDF analysis count
-        profile.pdf_analyses_this_month += 1
-        profile.save()
-        
-        # Save the analysis conversation (without is_document_analysis and document_analyzed fields)
-        conversation = AIConversation.objects.create(
-            user=request.user,
-            prompt=f"Document analysis: {document.file_name}\n\nQuestion: {question}" if question else f"Document analysis: {document.file_name}",
-            response=analysis_text,
-            subject="Document Analysis",
-            difficulty="advanced",
-            user_tier_at_time=profile.subscription_tier,
-            model_used=model,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            total_tokens=total_tokens,
-            estimated_user_cost=Decimal('0.00'),  # Free when using Groq
-            your_service_fee=Decimal('0.0001'),
-            api_provider=provider,
-            response_time_ms=response_time,
-            # Remove key_source parameter since the model doesn't have it
-            # key_source=key_source,
-        )
-        
-        # Log the proxy request (remove key_source and document parameters)
-        api_log = APIProxyLog.objects.create(
-            user=request.user,
-            endpoint="document_analysis",
-            model=model,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            total_tokens=total_tokens,
-            estimated_user_cost=Decimal('0.00'),
-            your_service_fee=Decimal('0.0001'),
-            response_time_ms=response_time,
-            success=True,
-            provider=provider,
-            request_type="document_analysis",
-            # Remove key_source and document parameters since the model doesn't have them
-            # key_source=key_source,
-            # document=document
-        )
-        
-        # Format the analysis response
-        formatted_analysis = format_analysis_response(analysis_text, question)
-        
-        return Response({
-            "success": True,
-            "analysis": analysis_text,
-            "formatted_analysis": formatted_analysis,
-            "summary": {
-                "document_name": document.file_name,
-                "question": question if question else "General analysis",
-                "tokens_used": total_tokens,
-                "response_time_ms": response_time,
-                "provider": provider,
-                "model": model,
-                "using_system_key": using_system_fallback,
-                "pdf_analyses_used": profile.pdf_analyses_this_month,
-                "pdf_analyses_limit": tier_limits.get('pdf_limit', 0)
-            },
-            "conversation_id": conversation.id,
-            "document": {
-                "id": document.id,
-                "name": document.file_name,
-                "type": document.file_type,
-                "pages": document.page_count,
-                "size_mb": round(document.file_size / (1024 * 1024), 2)
-            }
-        })
-        
-    except Exception as e:
-        import traceback
-        error_msg = f"Document analysis error: {str(e)}"
-        print(error_msg)
-        traceback.print_exc()
-        return Response(
-            {'error': f'Analysis failed: {str(e)}'},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
-
 
 def format_analysis_response(analysis_text, question):
     """Format the analysis response for better display"""
@@ -1358,6 +1055,7 @@ class UserProfileList(generics.ListAPIView):
     queryset = UserProfile.objects.all()
     serializer_class = UserProfileSerializer
     permission_classes = [permissions.IsAdminUser]
+    
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def my_profile(request):
@@ -1458,11 +1156,9 @@ def ai_study_helper(request):
     subject = request.data.get("subject", "General")
     difficulty = request.data.get("difficulty", "Beginner")
     model = request.data.get("model", None)
-    generate_image = request.data.get("generate_image", False)
     
     print(f"Prompt: {prompt[:50]}...")
     print(f"Subject: {subject}, Difficulty: {difficulty}")
-    print(f"Image generation requested: {generate_image}")
     
     # Validate prompt
     if not prompt:
