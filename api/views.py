@@ -1502,7 +1502,6 @@ def ai_study_helper(request):
     import os
     import time
     import requests
-    import replicate
     from decimal import Decimal
     from django.conf import settings
 
@@ -1556,7 +1555,7 @@ def ai_study_helper(request):
     except UserProfile.DoesNotExist:
         profile = UserProfile.objects.create(user=request.user, level="beginner")
 
-    # ================= IMAGE GENERATION (UPDATED FOR HUGGINGFACE) =================
+    # ================= IMAGE GENERATION (UPDATED WITH NEW HUGGINGFACE ENDPOINT) =================
 
     if detect_image_request(prompt):
         print("🎨 Image generation request detected")
@@ -1577,8 +1576,9 @@ def ai_study_helper(request):
         try:
             print("🖼️ Connecting to HuggingFace...")
 
+            # NEW: Use the router endpoint
+            api_url = "https://router.huggingface.co/hf-inference/models"
             model_id = "stabilityai/stable-diffusion-xl-base-1.0"
-            api_url = f"https://api-inference.huggingface.co/models/{model_id}"
             
             headers = {
                 "Authorization": f"Bearer {hf_token}",
@@ -1588,10 +1588,10 @@ def ai_study_helper(request):
             payload = {
                 "inputs": image_prompt,
                 "parameters": {
-                    "negative_prompt": "blurry, low quality, distorted, watermark, ugly",
-                    "width": 768,  # Reduced for faster generation
+                    "negative_prompt": "blurry, low quality, distorted, watermark, ugly, bad anatomy, deformed",
+                    "width": 768,
                     "height": 768,
-                    "num_inference_steps": 20,
+                    "num_inference_steps": 25,
                     "guidance_scale": 7.5
                 },
                 "options": {
@@ -1600,12 +1600,16 @@ def ai_study_helper(request):
                 }
             }
             
+            # NEW: The full URL includes the model
+            full_url = f"{api_url}/{model_id}"
+            
             # Log what we're sending
             print(f"📤 Sending request to HuggingFace API...")
+            print(f"   URL: {full_url}")
             print(f"   Model: {model_id}")
             print(f"   Prompt: {image_prompt}")
             
-            response = requests.post(api_url, headers=headers, json=payload, timeout=60)
+            response = requests.post(full_url, headers=headers, json=payload, timeout=60)
             response_time = int((time.time() - start_time) * 1000)
             
             print(f"📥 Response status: {response.status_code}")
@@ -1732,13 +1736,17 @@ def ai_study_helper(request):
                     "details": response.text[:200]
                 }, status=400)
                 
+            elif response.status_code == 404:
+                print(f"❌ Model not found: {response.text[:200]}")
+                # Try alternative model
+                print("🔄 Trying alternative model: stabilityai/stable-diffusion-2-1")
+                return try_alternative_image_model(request, profile, image_prompt, prompt, difficulty, start_time)
+                
             else:
                 print(f"❌ API error {response.status_code}: {response.text[:200]}")
-                return Response({
-                    "success": False,
-                    "error": f"API error {response.status_code}",
-                    "details": response.text[:200]
-                }, status=500)
+                # Try alternative model
+                print("🔄 Trying alternative model due to API error")
+                return try_alternative_image_model(request, profile, image_prompt, prompt, difficulty, start_time)
 
         except requests.exceptions.Timeout:
             print("❌ Request timeout")
@@ -1857,6 +1865,128 @@ def ai_study_helper(request):
             "details": str(e)[:200]
         }, status=500)
 
+
+def try_alternative_image_model(request, profile, image_prompt, original_prompt, difficulty, start_time):
+    """Try alternative image generation models"""
+    try:
+        hf_token = getattr(settings, "HUGGINGFACE_TOKEN", None)
+        if not hf_token:
+            raise ValueError("No HuggingFace token available")
+        
+        # Try different models
+        alternative_models = [
+            "stabilityai/stable-diffusion-2-1",
+            "runwayml/stable-diffusion-v1-5",
+            "CompVis/stable-diffusion-v1-4"
+        ]
+        
+        for model_id in alternative_models:
+            try:
+                print(f"🔄 Trying model: {model_id}")
+                
+                api_url = "https://router.huggingface.co/hf-inference/models"
+                full_url = f"{api_url}/{model_id}"
+                
+                headers = {
+                    "Authorization": f"Bearer {hf_token}",
+                    "Content-Type": "application/json"
+                }
+                
+                payload = {
+                    "inputs": image_prompt,
+                    "parameters": {
+                        "negative_prompt": "blurry, low quality, distorted, watermark",
+                        "width": 512,
+                        "height": 512,
+                        "num_inference_steps": 20,
+                        "guidance_scale": 7.0
+                    }
+                }
+                
+                response = requests.post(full_url, headers=headers, json=payload, timeout=45)
+                
+                if response.status_code == 200:
+                    # Save image locally
+                    image_data = response.content
+                    filename = f"generated_{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
+                    filepath = os.path.join(settings.MEDIA_ROOT, 'generated_images', filename)
+                    
+                    os.makedirs(os.path.dirname(filepath), exist_ok=True)
+                    
+                    with open(filepath, 'wb') as f:
+                        f.write(image_data)
+                    
+                    base_url = request.build_absolute_uri('/')[:-1]
+                    image_url = f"{base_url}{settings.MEDIA_URL}generated_images/{filename}"
+                    
+                    response_time = int((time.time() - start_time) * 1000)
+                    
+                    answer = f"""
+🎨 **Image Generated Successfully**
+
+**Prompt:** {original_prompt}
+
+*Note: Using alternative model ({model_id})*
+
+![Generated Image]({image_url})
+
+**Image URL:** {image_url}
+
+*Tip: Click the image to view full size. Right-click to save.*
+"""
+
+                    # Create conversation record
+                    conversation_data = {
+                        'user': request.user,
+                        'prompt': original_prompt,
+                        'response': answer,
+                        'subject': "Image Generation",
+                        'difficulty': difficulty,
+                        'user_tier_at_time': profile.subscription_tier,
+                        'model_used': model_id,
+                        'api_provider': "huggingface",
+                        'response_time_ms': response_time,
+                    }
+                    
+                    # Add image fields if they exist
+                    if hasattr(AIConversation, 'is_image_generation'):
+                        conversation_data['is_image_generation'] = True
+                    if hasattr(AIConversation, 'image_url'):
+                        conversation_data['image_url'] = image_url
+                    
+                    AIConversation.objects.create(**conversation_data)
+                    profile.record_request(tokens=150)
+                    
+                    return Response({
+                        "success": True,
+                        "answer": answer,
+                        "image_generated": True,
+                        "image_url": image_url,
+                        "response_time_ms": response_time,
+                        "using_alternative_model": True,
+                        "alternative_model": model_id
+                    })
+                    
+                print(f"⚠️ Model {model_id} failed: {response.status_code}")
+                
+            except Exception as e:
+                print(f"⚠️ Error with model {model_id}: {e}")
+                continue
+        
+        # If all models fail
+        return Response({
+            "success": False,
+            "error": "All image generation models failed",
+            "message": "Image generation is currently unavailable. Please try again later or try a different prompt."
+        }, status=503)
+        
+    except Exception as e:
+        print(f"❌ Alternative model error: {e}")
+        return Response({
+            "success": False,
+            "error": "Image generation failed",
+            "details": str(e)[:100]
+        }, status=500)
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def analyze_pdf(request):
