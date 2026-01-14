@@ -7,14 +7,8 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.core.files.storage import default_storage
 from django.conf import settings
-from django.views.decorators.csrf import csrf_exempt  # ADD THIS
-from django.http import JsonResponse  # ADD THIS
-import logging
-from django.views.decorators.csrf import csrf_exempt
-from django.http import JsonResponse
-# CORRECT: This is the right import
-# CORRECT: This is the right import
-from .ai import proxy_ai_request_with_images, analyze_document_with_ai 
+
+# Django REST Framework imports
 from rest_framework.decorators import api_view, authentication_classes, permission_classes, parser_classes
 from rest_framework.authentication import SessionAuthentication, TokenAuthentication
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -38,9 +32,11 @@ import os
 import time
 import json
 import uuid
+import logging
 import traceback
 import requests
-
+# Add this import at the top of your views.py
+from .ai import proxy_ai_request_with_images, analyze_document_with_ai
 # Local imports
 from .models import (
     UserProfile, StudyContent, AIConversation, 
@@ -54,7 +50,6 @@ from .serializers import (
     AIConversationSerializer, ResellerSerializer,
     UploadedDocumentSerializer
 )
-from .ai import proxy_ai_request_with_images, analyze_document_with_ai  # ADD THIS
 
 logger = logging.getLogger(__name__)
 
@@ -288,20 +283,13 @@ def login_user(request):
         
 @csrf_exempt
 def generate_image(request):
-    """Legacy image generation endpoint (for backward compatibility)"""
     if request.method == "POST":
         try:
             data = json.loads(request.body)
             prompt = data.get("prompt", "")
             
             # Get token from settings
-            api_token = getattr(settings, 'REPLICATE_API_TOKEN', None)
-            
-            if not api_token:
-                return JsonResponse({
-                    "success": False,
-                    "error": "Replicate API token not configured"
-                }, status=500)
+            api_token = settings.REPLICATE_API_TOKEN
             
             # Call Replicate
             output = replicate.run(
@@ -322,138 +310,6 @@ def generate_image(request):
             }, status=500)
     
     return JsonResponse({"error": "Method not allowed"}, status=405)
-        
-        
-@api_view(['POST'])
-@authentication_classes([JWTAuthentication, SessionAuthentication])
-@permission_classes([IsAuthenticated])
-def analyze_document(request):
-    """Analyze an uploaded document with AI using enhanced function"""
-    print(f"Analyze document called by user: {request.user.username}")
-    
-    try:
-        document_id = request.data.get('document_id')
-        question = request.data.get('question', '')
-        
-        if not document_id:
-            print("ERROR: No document_id provided")
-            return Response(
-                {'error': 'Document ID required'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Get document
-        try:
-            document = UploadedDocument.objects.get(id=document_id, user=request.user)
-            print(f"Found document: {document.file_name}")
-        except UploadedDocument.DoesNotExist:
-            print(f"ERROR: Document {document_id} not found for user {request.user.username}")
-            return Response(
-                {'error': 'Document not found'},
-                status=status.HTTP_404_NOT_FOUND
-            )
-        
-        if not document.extracted_text:
-            print(f"ERROR: Document {document_id} has no extracted text")
-            return Response(
-                {'error': 'Document has no extracted text'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        
-        # Get user profile
-        profile = request.user.userprofile
-        
-        # Use the enhanced analyze_document_with_ai function
-        result = analyze_document_with_ai(
-            document_text=document.extracted_text,
-            question=question if question else "",
-            api_key=profile.get_api_key(),
-            provider=profile.preferred_provider,
-            model=profile.preferred_model,
-            user_profile=profile
-        )
-        
-        if result.get("success"):
-            # Update PDF analysis count
-            profile.pdf_analyses_this_month += 1
-            profile.save()
-            
-            # Save the analysis conversation
-            conversation = AIConversation.objects.create(
-                user=request.user,
-                prompt=f"Document analysis: {document.file_name}\n\nQuestion: {question}" if question else f"Document analysis: {document.file_name}",
-                response=result["analysis"],
-                subject="Document Analysis",
-                difficulty="advanced",
-                user_tier_at_time=profile.subscription_tier,
-                model_used=result.get("model", profile.preferred_model),
-                input_tokens=result.get("input_tokens", 0),
-                output_tokens=result.get("output_tokens", 0),
-                total_tokens=result.get("tokens_used", 0),
-                estimated_user_cost=Decimal('0.00'),
-                your_service_fee=Decimal('0.0001'),
-                api_provider=result.get("provider", profile.preferred_provider),
-                response_time_ms=0,
-                is_document_analysis=True,
-                document_analyzed=document
-            )
-            
-            # Log the proxy request
-            api_log = APIProxyLog.objects.create(
-                user=request.user,
-                endpoint="document_analysis",
-                model=result.get("model", profile.preferred_model),
-                input_tokens=result.get("input_tokens", 0),
-                output_tokens=result.get("output_tokens", 0),
-                total_tokens=result.get("tokens_used", 0),
-                estimated_user_cost=Decimal('0.00'),
-                your_service_fee=Decimal('0.0001'),
-                response_time_ms=0,
-                success=True,
-                provider=result.get("provider", profile.preferred_provider),
-                request_type="document_analysis",
-                key_source="user" if not result.get("using_system_fallback") else "system_fallback"
-            )
-            
-            return Response({
-                "success": True,
-                "analysis": result["analysis"],
-                "summary": {
-                    "document_name": document.file_name,
-                    "question": question if question else "General analysis",
-                    "tokens_used": result.get("tokens_used", 0),
-                    "provider": result.get("provider", profile.preferred_provider),
-                    "model": result.get("model", profile.preferred_model),
-                    "using_system_key": result.get("using_system_fallback", False),
-                    "pdf_analyses_used": profile.pdf_analyses_this_month,
-                    "pdf_analyses_limit": profile.get_tier_limits().get('pdf_limit', 0)
-                },
-                "conversation_id": conversation.id,
-                "document": {
-                    "id": document.id,
-                    "name": document.file_name,
-                    "type": document.file_type,
-                    "pages": document.page_count,
-                    "size_mb": round(document.file_size / (1024 * 1024), 2)
-                }
-            })
-        else:
-            return Response({
-                "success": False,
-                "error": result.get("error", "Analysis failed"),
-                "requires_setup": result.get("requires_setup", False),
-                "suggestion": result.get("suggestion", "")
-            }, status=status.HTTP_400_BAD_REQUEST)
-            
-    except Exception as e:
-        import traceback
-        error_msg = f"Document analysis error: {str(e)}"
-        print(error_msg)
-        traceback.print_exc()
-        return Response(
-            {'error': f'Analysis failed: {str(e)}'},
-            status=status.HTTP_500_INTERNAL_SERVER_ERROR
-        )
         
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -548,6 +404,13 @@ def get_current_user(request):
             "monthly_reset_date": profile.monthly_reset_date
         }
     })    
+# Add these imports at the top if not already there
+from django.views.decorators.csrf import csrf_exempt
+from django.http import JsonResponse
+import logging
+
+# Set up logger
+logger = logging.getLogger(__name__)
 
 # Add this simple test endpoint first
 @csrf_exempt
@@ -748,6 +611,9 @@ def upload_document(request):
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
 
+# Add this import
+from django.http import JsonResponse
+
 @api_view(['GET'])
 @authentication_classes([JWTAuthentication])  # Use JWTAuthentication since that's what you fixed
 @permission_classes([IsAuthenticated])
@@ -824,6 +690,310 @@ def delete_document(request, document_id):
             {'error': f'Deletion failed: {str(e)}'},
             status=status.HTTP_500_INTERNAL_SERVER_ERROR
         )
+from .ai import proxy_ai_request, ask_ai  # Add this import at the top
+
+@api_view(['POST'])
+@authentication_classes([JWTAuthentication, SessionAuthentication])
+@permission_classes([IsAuthenticated])
+def analyze_document(request):
+    """Analyze an uploaded document with AI using user's API key or fallback"""
+    print(f"Analyze document called by user: {request.user.username}")
+    
+    try:
+        document_id = request.data.get('document_id')
+        question = request.data.get('question', '')
+        
+        if not document_id:
+            print("ERROR: No document_id provided")
+            return Response(
+                {'error': 'Document ID required'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get document
+        try:
+            document = UploadedDocument.objects.get(id=document_id, user=request.user)
+            print(f"Found document: {document.file_name}")
+        except UploadedDocument.DoesNotExist:
+            print(f"ERROR: Document {document_id} not found for user {request.user.username}")
+            return Response(
+                {'error': 'Document not found'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        
+        if not document.extracted_text:
+            print(f"ERROR: Document {document_id} has no extracted text")
+            return Response(
+                {'error': 'Document has no extracted text'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        
+        # Get user profile
+        profile = request.user.userprofile
+        
+        # Check PDF analysis limits
+        try:
+            tier_limits = profile.get_tier_limits()
+            if profile.pdf_analyses_this_month >= tier_limits.get('pdf_limit', 0):
+                return Response({
+                    'error': 'PDF analysis limit reached',
+                    'limit': tier_limits.get('pdf_limit', 0),
+                    'used': profile.pdf_analyses_this_month,
+                    'upgrade_url': '/plans/'
+                }, status=status.HTTP_402_PAYMENT_REQUIRED)
+        except AttributeError as e:
+            print(f"WARNING: get_tier_limits() not found: {e}")
+            # Use default limits
+            tier_limits = {'pdf_limit': 3}
+        
+        # === GET API KEY ===
+        api_key = None
+        key_source = "user"
+        using_system_fallback = False
+        
+        # 1. Try to get user's API key first
+        api_key = profile.get_api_key()
+        
+        # 2. If user has no API key, use YOUR fallback API key from env
+        if not api_key:
+            key_source = "system_fallback"
+            using_system_fallback = True
+            
+            # Use Groq fallback (FREE!)
+            api_key = (
+                os.environ.get('GROQ_API_KEY') or
+                os.environ.get('GROQ_FALLBACK_KEY') or
+                os.environ.get('STUDYPILOT_GROQ_API_KEY')
+            )
+            
+            if api_key:
+                print(f"Using SYSTEM fallback Groq API key from environment")
+                provider = 'groq'
+                model = 'llama-3.1-8b-instant'
+            else:
+                # If no system key either, ask user to set up
+                return Response({
+                    "success": False,
+                    "error": "API key not configured",
+                    "setup_required": True,
+                    "message": "Please set up your Groq API key (FREE) in your profile",
+                    "setup_url": "/profile/api-setup/",
+                    "using_system_fallback": False
+                }, status=status.HTTP_402_PAYMENT_REQUIRED)
+        else:
+            # User has their own API key
+            provider = profile.preferred_provider
+            model = profile.preferred_model
+        
+        print(f"Using provider: {provider}, Model: {model}, Key source: {key_source}")
+        
+        # Prepare document context (limit tokens)
+        document_context = document.extracted_text[:8000]  # Limit context
+        
+        # Create prompt based on whether question is provided
+        if question:
+            prompt = f"""Analyze this document and answer the following question.
+
+DOCUMENT:
+{document_context}
+
+QUESTION: {question}
+
+Instructions:
+1. Answer based ONLY on the document content
+2. If the information isn't in the document, say "The document doesn't contain information about this"
+3. Be specific and cite relevant parts of the document
+4. If the question is complex, break it down into parts
+
+ANSWER:"""
+        else:
+            prompt = f"""Please analyze this document comprehensively:
+
+DOCUMENT:
+{document_context}
+
+Provide a detailed analysis with the following sections:
+1. **Summary**: 2-3 paragraph overview
+2. **Key Topics**: Main subjects and themes covered
+3. **Important Points**: Significant findings, data, or arguments
+4. **Structure**: How the document is organized
+5. **Purpose & Audience**: Who it's for and why it was created
+6. **Recommendations**: If applicable, suggestions based on the content
+
+ANALYSIS:"""
+        
+        print(f"Sending request to {provider} API...")
+        print(f"Document context length: {len(document_context)} chars")
+        print(f"Prompt length: {len(prompt)} chars")
+        
+        # Prepare conversation for AI
+        conversation = [
+            {
+                "role": "system", 
+                "content": "You are an expert document analyzer. Analyze documents thoroughly and provide detailed, accurate analysis based ONLY on the document content provided."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+        
+        # Make the API call using your ai.py
+        start_time = time.time()
+        
+        try:
+            from .ai import ask_ai_with_provider
+            
+            # Call the AI using your ai.py functions
+            ai_result = ask_ai_with_provider(
+                api_key=api_key,
+                provider=provider,
+                messages=conversation,
+                model=model,
+                max_tokens=2500,
+                temperature=0.3
+            )
+            
+            response_time = int((time.time() - start_time) * 1000)
+            
+            analysis_text = ai_result["answer"]
+            input_tokens = ai_result["input_tokens"]
+            output_tokens = ai_result["output_tokens"]
+            total_tokens = ai_result["total_tokens"]
+            
+            print(f"Analysis completed: {len(analysis_text)} chars, {total_tokens} tokens")
+            
+        except Exception as ai_error:
+            # Fallback to direct API call if ai.py fails
+            print(f"ai.py call failed, falling back to direct API: {ai_error}")
+            
+            # Direct API call as fallback
+            if provider == 'groq':
+                url = "https://api.groq.com/openai/v1/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                }
+                payload = {
+                    "model": model,
+                    "messages": conversation,
+                    "max_tokens": 2500,
+                    "temperature": 0.3
+                }
+                response = requests.post(url, headers=headers, json=payload, timeout=60)
+                response_data = response.json()
+                analysis_text = response_data['choices'][0]['message']['content']
+                tokens = response_data.get('usage', {})
+                input_tokens = tokens.get('prompt_tokens', 0)
+                output_tokens = tokens.get('completion_tokens', 0)
+                total_tokens = tokens.get('total_tokens', 0)
+                response_time = int((time.time() - start_time) * 1000)
+            
+            elif provider == 'openai':
+                url = "https://api.openai.com/v1/chat/completions"
+                headers = {
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json"
+                }
+                payload = {
+                    "model": model,
+                    "messages": conversation,
+                    "max_tokens": 2500,
+                    "temperature": 0.3
+                }
+                response = requests.post(url, headers=headers, json=payload, timeout=60)
+                response_data = response.json()
+                analysis_text = response_data['choices'][0]['message']['content']
+                tokens = response_data.get('usage', {})
+                input_tokens = tokens.get('prompt_tokens', 0)
+                output_tokens = tokens.get('completion_tokens', 0)
+                total_tokens = tokens.get('total_tokens', 0)
+                response_time = int((time.time() - start_time) * 1000)
+            
+            else:
+                raise Exception(f"Provider {provider} not supported in fallback")
+        
+        # Update PDF analysis count
+        profile.pdf_analyses_this_month += 1
+        profile.save()
+        
+        # Save the analysis conversation (without is_document_analysis and document_analyzed fields)
+        conversation = AIConversation.objects.create(
+            user=request.user,
+            prompt=f"Document analysis: {document.file_name}\n\nQuestion: {question}" if question else f"Document analysis: {document.file_name}",
+            response=analysis_text,
+            subject="Document Analysis",
+            difficulty="advanced",
+            user_tier_at_time=profile.subscription_tier,
+            model_used=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            estimated_user_cost=Decimal('0.00'),  # Free when using Groq
+            your_service_fee=Decimal('0.0001'),
+            api_provider=provider,
+            response_time_ms=response_time,
+            # Remove key_source parameter since the model doesn't have it
+            # key_source=key_source,
+        )
+        
+        # Log the proxy request (remove key_source and document parameters)
+        api_log = APIProxyLog.objects.create(
+            user=request.user,
+            endpoint="document_analysis",
+            model=model,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            total_tokens=total_tokens,
+            estimated_user_cost=Decimal('0.00'),
+            your_service_fee=Decimal('0.0001'),
+            response_time_ms=response_time,
+            success=True,
+            provider=provider,
+            request_type="document_analysis",
+            # Remove key_source and document parameters since the model doesn't have them
+            # key_source=key_source,
+            # document=document
+        )
+        
+        # Format the analysis response
+        formatted_analysis = format_analysis_response(analysis_text, question)
+        
+        return Response({
+            "success": True,
+            "analysis": analysis_text,
+            "formatted_analysis": formatted_analysis,
+            "summary": {
+                "document_name": document.file_name,
+                "question": question if question else "General analysis",
+                "tokens_used": total_tokens,
+                "response_time_ms": response_time,
+                "provider": provider,
+                "model": model,
+                "using_system_key": using_system_fallback,
+                "pdf_analyses_used": profile.pdf_analyses_this_month,
+                "pdf_analyses_limit": tier_limits.get('pdf_limit', 0)
+            },
+            "conversation_id": conversation.id,
+            "document": {
+                "id": document.id,
+                "name": document.file_name,
+                "type": document.file_type,
+                "pages": document.page_count,
+                "size_mb": round(document.file_size / (1024 * 1024), 2)
+            }
+        })
+        
+    except Exception as e:
+        import traceback
+        error_msg = f"Document analysis error: {str(e)}"
+        print(error_msg)
+        traceback.print_exc()
+        return Response(
+            {'error': f'Analysis failed: {str(e)}'},
+            status=status.HTTP_500_INTERNAL_SERVER_ERROR
+        )
+
 
 def format_analysis_response(analysis_text, question):
     """Format the analysis response for better display"""
@@ -1056,7 +1226,6 @@ class UserProfileList(generics.ListAPIView):
     queryset = UserProfile.objects.all()
     serializer_class = UserProfileSerializer
     permission_classes = [permissions.IsAdminUser]
-    
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])
 def my_profile(request):
@@ -1146,11 +1315,14 @@ class AIConversationList(generics.ListAPIView):
 import os
 from django.conf import settings
 
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def ai_study_helper(request):
-    """Enhanced AI chat endpoint with image generation support"""
-    print("=== AI CHAT REQUEST STARTED (Enhanced) ===")
+    """Main AI chat endpoint - PROXY to user's API key with fallback to system keys"""
+    print("=== AI CHAT REQUEST STARTED ===")
+    
+    start_time = time.time()
     
     # Extract request data
     prompt = request.data.get("prompt", "").strip()
@@ -1168,187 +1340,467 @@ def ai_study_helper(request):
             status=status.HTTP_400_BAD_REQUEST
         )
     
+    # Get user profile
     try:
-        # Use the enhanced proxy function with image support
-        result = proxy_ai_request_with_images(
-            user=request.user,
-            prompt=prompt,
-            subject=subject,
-            difficulty=difficulty,
-            model=model
-        )
+        profile = request.user.userprofile
+        print(f"Profile found: {profile.subscription_tier}")
+        print(f"Preferred provider: {profile.preferred_provider}")
+        print(f"OpenAI key type: {profile.openai_key_type}")
+    except UserProfile.DoesNotExist:
+        print("Creating new profile...")
+        profile = UserProfile.objects.create(user=request.user, level="beginner")
+    
+    # === TEMPORARY: SKIP RATE LIMITING CHECK ===
+    print(f"DEBUG: Skipping rate limit check for {request.user.username}")
+    
+    # === GET API KEY WITH FALLBACK SYSTEM ===
+    api_key = None
+    key_source = "user"  # Track where the key came from
+    using_system_fallback = False
+    
+    # 1. Try to get user's API key first
+    api_key = profile.get_api_key()
+    
+    # 2. If user has no API key, use YOUR fallback API key from env
+    if not api_key:
+        key_source = "system_fallback"
+        using_system_fallback = True
         
-        if result.get("success"):
-            # Get user profile for usage stats
-            profile = request.user.userprofile
+        # Determine which fallback key to use based on provider
+        if profile.preferred_provider == "groq":
+            # IMPORTANT: Try multiple fallback sources in order
+            api_key = (
+                os.environ.get('GROQ_API_KEY') or  # First try GROQ_API_KEY
+                os.environ.get('GROQ_FALLBACK_KEY') or  # Then GROQ_FALLBACK_KEY
+                os.environ.get('STUDYPILOT_GROQ_API_KEY')  # Then STUDYPILOT_GROQ_API_KEY
+            )
             
-            return Response({
-                "success": True,
-                "response": result.get("response", result.get("answer", "")),
-                "answer": result.get("answer", ""),
-                "image_generated": result.get("image_generated", False),
-                "image_url": result.get("image_url"),
-                "image_prompt": result.get("image_prompt"),
-                "usage": {
-                    "requests_today": profile.requests_today,
-                    "daily_limit": profile.get_tier_limits()['daily_requests'],  # This .get() is OK - it's on the dict
-                    "tokens_this_month": profile.tokens_this_month,
-                    "tier": profile.subscription_tier,
-                    "has_api_key": profile.has_api_key(),  # This method exists
-                    "using_fallback": result.get("using_system_fallback", False)
-                },
-                "costs": {
-                    "estimated_user_cost": result.get("estimated_user_cost", 0.00),
-                    "your_service_fee": result.get("your_service_fee", 0.0001),
-                    "total_tokens": result.get("total_tokens", 0),
-                    "provider": result.get("provider", "groq"),
-                    "is_free": result.get("is_free", True),
-                    "key_source": result.get("key_source", "unknown"),
-                    "using_system_key": result.get("using_system_fallback", False),
-                    "token_info": {
-                        "input_tokens": result.get("input_tokens", 0),
-                        "output_tokens": result.get("output_tokens", 0),
-                        "total_tokens": result.get("total_tokens", 0)
-                    }
-                },
-                "performance": {
-                    "response_time_ms": result.get("response_time_ms", 0),
-                    "provider": result.get("provider", "groq")
-                },
-                "your_profit": float(result.get("your_service_fee", 0.0001))
-            })
-        else:
-            # Return error response
-            return Response({
-                "success": False,
-                "error": result.get("error", "Unknown error"),
-                "requires_setup": result.get("requires_setup", False),
-                "provider": result.get("provider", "groq"),
-                "suggestion": result.get("suggestion", "")
-            }, status=status.HTTP_400_BAD_REQUEST if result.get("requires_setup") else status.HTTP_503_SERVICE_UNAVAILABLE)
+            if api_key:
+                print(f"Using SYSTEM fallback Groq API key from environment")
+            else:
+                # If no system key either, ask user to set up
+                provider_info = profile.get_provider_info()
+                return Response({
+                    "success": False,
+                    "error": "API key not configured",
+                    "setup_required": True,
+                    "message": f"Please set up your {provider_info.get('name', 'AI')} API key in your profile",
+                    "setup_url": "/profile/api-setup/",
+                    "using_system_fallback": False
+                }, status=status.HTTP_402_PAYMENT_REQUIRED)
+                
+        elif profile.preferred_provider == "openai":
+            # Try multiple fallback sources for OpenAI
+            api_key = (
+                os.environ.get('OPENAI_API_KEY') or  # First try OPENAI_API_KEY
+                os.environ.get('OPENAI_FALLBACK_KEY') or  # Then OPENAI_FALLBACK_KEY
+                os.environ.get('STUDYPILOT_OPENAI_API_KEY')  # Then STUDYPILOT_OPENAI_API_KEY
+            )
             
-    except Exception as e:
-        import traceback
-        print(f"=== EXCEPTION CAUGHT ===")
-        print(f"Error: {str(e)}")
-        traceback.print_exc()
-        
+            if api_key:
+                print(f"Using SYSTEM fallback OpenAI API key from environment")
+            else:
+                # If no system key either, ask user to set up
+                provider_info = profile.get_provider_info()
+                return Response({
+                    "success": False,
+                    "error": "API key not configured",
+                    "setup_required": True,
+                    "message": f"Please set up your {provider_info.get('name', 'AI')} API key in your profile",
+                    "setup_url": "/profile/api-setup/",
+                    "using_system_fallback": False
+                }, status=status.HTTP_402_PAYMENT_REQUIRED)
+    else:
+        print(f"Using USER'S API key for {profile.preferred_provider}")
+    
+    print(f"API Key source: {key_source}")
+    print(f"Using system fallback: {using_system_fallback}")
+    print(f"API Key exists: {bool(api_key)}")
+    print(f"API Key first 10 chars: {api_key[:10] if api_key else 'None'}...")
+    
+    # Use preferred model if not specified
+    if not model:
+        model = profile.preferred_model
+    
+    print(f"Model: {model}")
+    
+    # Validate model is compatible with provider
+    if not profile.validate_model_selection(model):
         return Response({
             "success": False,
-            "error": f"AI request error: {str(e)[:100]}",
-            "error_type": type(e).__name__
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-        
-@api_view(['POST'])
-@authentication_classes([JWTAuthentication, SessionAuthentication])
-@permission_classes([IsAuthenticated])
-def generate_ai_image(request):
-    """Dedicated endpoint for AI image generation"""
-    print("=== AI IMAGE GENERATION REQUEST ===")
-    print(f"User: {request.user.username}")
-    print(f"Data: {request.data}")
+            "error": "Invalid model selection",
+            "details": f"Model '{model}' is not compatible with {profile.preferred_provider}",
+            "available_models": profile.get_available_models()
+        }, status=status.HTTP_400_BAD_REQUEST)
     
-    prompt = request.data.get("prompt", "").strip()
+    # Build conversation history
+    previous_convos = list(AIConversation.objects.filter(user=request.user).order_by("-created_at")[:5])
+    previous_convos.reverse()
     
-    if not prompt:
-        return Response(
-            {"error": "Image prompt is required"},
-            status=status.HTTP_400_BAD_REQUEST
-        )
+    messages = []
+    for convo in previous_convos:
+        if convo.prompt:
+            messages.append({"role": "user", "content": convo.prompt[:500]})
+        if convo.response:
+            messages.append({"role": "assistant", "content": convo.response[:500]})
     
-    print(f"Image prompt: {prompt[:100]}...")
+    # Add current message
+    messages.append({"role": "user", "content": prompt[:4000]})
+    
+    print(f"Number of previous conversations: {len(previous_convos)}")
+    print(f"Total messages to send: {len(messages)}")
     
     try:
-        # Get Replicate API token from settings
-        api_token = getattr(settings, 'REPLICATE_API_TOKEN', None)
+        # Determine provider from model
+        provider = profile.preferred_provider
+        print(f"Provider: {provider}")
         
-        print(f"Replicate token available: {bool(api_token)}")
-        print(f"Token length: {len(api_token) if api_token else 0}")
-        print(f"Token starts with 'r8_': {api_token.startswith('r8_') if api_token else False}")
-        
-        if not api_token:
-            print("❌ ERROR: No Replicate API token found in settings!")
-            print("Please set REPLICATE_API_TOKEN environment variable")
+        # Prepare request based on provider
+        if provider == "openai":
+            print("Using OpenAI...")
+            url = "https://api.openai.com/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": model,
+                "messages": messages,
+                "max_tokens": profile.get_tier_limits().get('max_tokens_per_request', 2000),
+                "temperature": 0.7
+            }
+            
+        elif provider == "groq":
+            print("Using Groq...")
+            url = "https://api.groq.com/openai/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": model,
+                "messages": messages,
+                "max_tokens": profile.get_tier_limits().get('max_tokens_per_request', 2000),
+                "temperature": 0.7
+            }
+            print(f"Groq URL: {url}")
+            print(f"Groq headers: Authorization: Bearer {api_key[:10]}...")
+            print(f"Groq payload keys: {list(payload.keys())}")
+            
+        else:
             return Response({
                 "success": False,
-                "error": "Image generation service not configured",
-                "setup_required": True,
-                "setup_url": "https://replicate.com/account",
-                "message": "Admin needs to configure Replicate API token"
-            }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+                "error": f"Provider {provider} not yet supported"
+            }, status=400)
         
-        # Test token validity
-        if not api_token.startswith('r8_'):
-            print(f"❌ ERROR: Invalid Replicate token format. Should start with 'r8_'")
+        print(f"Making request to {provider} API...")
+        
+        # Make request to provider API
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        print(f"Response status: {response.status_code}")
+        
+        response_data = response.json()
+        response_time = int((time.time() - start_time) * 1000)
+        
+        print(f"Response data keys: {list(response_data.keys())}")
+        
+        if response.status_code != 200:
+            # Still count as request against YOUR limits
+            profile.record_request(tokens=0)
+            
+            print(f"API Error: {response_data}")
+            
+            # Handle specific OpenAI errors
+            if provider == "openai":
+                error_msg = response_data.get('error', {}).get('message', 'Unknown error')
+                error_type = response_data.get('error', {}).get('type', '')
+                error_code = response_data.get('error', {}).get('code', '')
+                
+                print(f"OpenAI Error: {error_msg}")
+                print(f"OpenAI Error Type: {error_type}")
+                print(f"OpenAI Error Code: {error_code}")
+                
+                # Check if it's an insufficient quota error (free tier expired or no credits)
+                if (response.status_code == 429 or 
+                    'insufficient_quota' in str(response_data).lower() or 
+                    'exceeded your current quota' in error_msg or 
+                    'account has no remaining credits' in error_msg or
+                    'quota' in error_msg.lower() or
+                    error_code == 'insufficient_quota'):
+                    
+                    print("Detected OpenAI quota/credit error")
+                    
+                    # Determine specific issue
+                    if profile.openai_key_type == 'free_tier':
+                        # Free tier account
+                        error_title = "OpenAI Free Credits Expired"
+                        error_details = "Your OpenAI free credits have expired. Add payment method or switch to FREE Groq."
+                    else:
+                        # Paid account with no credits
+                        error_title = "OpenAI Account Needs Credits"
+                        error_details = "Your OpenAI account has no remaining credits. Add payment method to your OpenAI account."
+                    
+                    return Response({
+                        "success": False,
+                        "error": error_title,
+                        "details": error_details,
+                        "provider_error": True,
+                        "provider": provider,
+                        "error_type": "insufficient_quota",
+                        "error_code": response.status_code,
+                        "original_error": error_msg,
+                        "auto_suggest_groq": True,
+                        "groq_signup_url": "https://console.groq.com/signup",
+                        "solutions": [
+                            "1. Add payment method to OpenAI account: https://platform.openai.com/account/billing",
+                            "2. Switch to FREE Groq (5M tokens/month!) - RECOMMENDED"
+                        ],
+                        "switch_provider_url": "/profile/#api-settings",
+                        "credit_balance": float(profile.openai_key_credit_balance),
+                        "account_type": profile.openai_key_type,
+                        "using_system_fallback": using_system_fallback,
+                        "key_source": key_source
+                    }, status=402)
+                
+                elif response.status_code == 401:
+                    # Check if using system fallback - if so, your system key might be invalid
+                    if using_system_fallback:
+                        error_title = "System API Key Invalid"
+                        error_details = "The system fallback API key is invalid. Please contact support or add your own API key."
+                    else:
+                        error_title = "Invalid OpenAI API Key"
+                        error_details = "Your OpenAI API key is invalid or has been revoked."
+                    
+                    return Response({
+                        "success": False,
+                        "error": error_title,
+                        "details": error_details,
+                        "provider_error": True,
+                        "provider": provider,
+                        "action_required": "Get a new API key from https://platform.openai.com/api-keys",
+                        "original_error": error_msg,
+                        "using_system_fallback": using_system_fallback,
+                        "key_source": key_source
+                    }, status=401)
+                
+                elif response.status_code == 429 and 'rate_limit' in error_msg.lower():
+                    # Rate limit error (different from quota)
+                    return Response({
+                        "success": False,
+                        "error": "OpenAI Rate Limit",
+                        "details": "You've hit OpenAI's rate limits.",
+                        "provider_error": True,
+                        "provider": provider,
+                        "suggestion": "Try again in a few moments or switch to Groq",
+                        "original_error": error_msg,
+                        "using_system_fallback": using_system_fallback,
+                        "key_source": key_source
+                    }, status=429)
+                
+                elif response.status_code == 404 and 'model' in error_msg.lower():
+                    # Model not found error
+                    return Response({
+                        "success": False,
+                        "error": "OpenAI Model Not Available",
+                        "details": f"The model '{model}' is not available with your account.",
+                        "provider_error": True,
+                        "provider": provider,
+                        "suggestion": "Switch to a different model or check your account access",
+                        "original_error": error_msg,
+                        "using_system_fallback": using_system_fallback,
+                        "key_source": key_source
+                    }, status=404)
+                
+                else:
+                    # Other OpenAI errors
+                    return Response({
+                        "success": False,
+                        "error": f"OpenAI API Error",
+                        "details": f"{error_msg} (Status: {response.status_code})",
+                        "provider_error": True,
+                        "provider": provider,
+                        "original_error": error_msg,
+                        "error_code": response.status_code,
+                        "using_system_fallback": using_system_fallback,
+                        "key_source": key_source
+                    }, status=response.status_code)
+            
+            # Handle Groq errors
+            elif provider == "groq" and response.status_code == 401:
+                # Check if using system fallback
+                if using_system_fallback:
+                    error_title = "System Groq Key Invalid"
+                    error_details = "The system fallback Groq API key is invalid. Please contact support."
+                else:
+                    error_title = "Invalid Groq API Key"
+                    error_details = "Your Groq API key is invalid or has been revoked."
+                
+                return Response({
+                    "success": False,
+                    "error": error_title,
+                    "details": error_details,
+                    "provider_error": True,
+                    "provider": provider,
+                    "action_required": "Get a FREE API key from https://console.groq.com/keys",
+                    "original_error": response_data.get('error', {}).get('message', 'Invalid API key'),
+                    "using_system_fallback": using_system_fallback,
+                    "key_source": key_source
+                }, status=401)
+            
+            elif provider == "groq" and response.status_code == 429:
+                return Response({
+                    "success": False,
+                    "error": "Groq Rate Limit",
+                    "details": "Groq free tier rate limit reached. Try again in a moment.",
+                    "provider_error": True,
+                    "provider": provider,
+                    "suggestion": "Groq free tier has generous limits, but if you hit them, wait a minute and try again.",
+                    "original_error": response_data.get('error', {}).get('message', 'Rate limit exceeded'),
+                    "using_system_fallback": using_system_fallback,
+                    "key_source": key_source
+                }, status=429)
+            
+            # Handle all other provider errors
             return Response({
                 "success": False,
-                "error": "Invalid Replicate API token format",
-                "message": "Token should start with 'r8_'"
-            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                "error": f"AI provider error",
+                "details": f"{response_data.get('error', {}).get('message', 'Unknown error')}",
+                "provider_error": True,
+                "provider": provider,
+                "original_error": response_data.get('error', {}).get('message', 'Unknown error'),
+                "error_code": response.status_code,
+                "using_system_fallback": using_system_fallback,
+                "key_source": key_source
+            }, status=response.status_code)
         
-        # Generate the image using the imported function
-        from .ai import generate_image_with_replicate_api
+        # Extract response text
+        if provider in ["openai", "groq"]:
+            print("Extracting OpenAI/Groq response...")
+            answer = response_data['choices'][0]['message']['content']
+            tokens = parse_tokens_from_response(response_data)
         
-        print(f"🖼️ Calling generate_image_with_replicate_api...")
-        result = generate_image_with_replicate_api(prompt, api_token)
+        print(f"Answer length: {len(answer)} chars")
+        print(f"Tokens: input={tokens['input_tokens']}, output={tokens['output_tokens']}")
         
-        print(f"✅ Image generated successfully: {result.get('image_url', '')[:50]}...")
+        # Calculate costs (USER pays this - FREE for Groq!)
+        key_type = profile.openai_key_type if provider == 'openai' else 'unknown'
+        user_cost = calculate_user_cost(tokens['input_tokens'], tokens['output_tokens'], model, key_type)
         
-        # Save to conversation history
-        conversation = AIConversation.objects.create(
-            user=request.user,
-            prompt=f"Generate image: {prompt}",
-            response=f"Image generated: {result['image_url']}",
-            subject="Image Generation",
-            difficulty="general",
-            user_tier_at_time=request.user.userprofile.subscription_tier,
-            model_used=result.get("model", "stability-ai/sdxl"),
-            input_tokens=0,
-            output_tokens=0,
-            total_tokens=0,
-            estimated_user_cost=Decimal('0.00'),
-            your_service_fee=Decimal('0.0005'),
-            api_provider="replicate",
-            response_time_ms=0,
-            is_image_response=True
+        # Determine if this request is free for user
+        # If using system fallback, user pays nothing
+        is_free_for_user = (
+            using_system_fallback or  # User pays nothing when using YOUR key
+            provider == 'groq' or 
+            (provider == 'openai' and key_type == 'free_tier' and 'gpt-3.5' in model.lower())
         )
         
-        # Format the response
-        response_text = f"🎨 **Image Generated Successfully!**\n\n"
-        response_text += f"**Prompt:** {prompt}\n\n"
-        response_text += f"![Generated Image]({result['image_url']})\n\n"
-        response_text += f"**Tips:**\n"
-        response_text += f"• Click the image to view full size\n"
-        response_text += f"• Right-click to save/download\n"
-        response_text += f"• For better results, be specific with your descriptions\n\n"
-        response_text += f"*Image generated using Stable Diffusion XL*"
+        # YOUR service fee (tiny profit)
+        your_service_fee = Decimal('0.0001')
+        
+        # Save conversation with key source info
+        conversation = AIConversation.objects.create(
+            user=request.user,
+            prompt=prompt,
+            response=answer,
+            subject=subject,
+            difficulty=difficulty,
+            user_tier_at_time=profile.subscription_tier,
+            model_used=model,
+            input_tokens=tokens['input_tokens'],
+            output_tokens=tokens['output_tokens'],
+            total_tokens=tokens['total_tokens'],
+            estimated_user_cost=Decimal('0.00'),  # Free for user when using system fallback
+            your_service_fee=your_service_fee,
+            api_provider=provider,
+            response_time_ms=response_time,
+            key_source=key_source  # Track if it was user's key or fallback
+        )
+        
+        # Record request (YOUR service)
+        profile.record_request(tokens=tokens['total_tokens'])
+        
+        # Log proxy request (YOUR analytics)
+        api_log = APIProxyLog.objects.create(
+            user=request.user,
+            endpoint="chat/completions",
+            model=model,
+            input_tokens=tokens['input_tokens'],
+            output_tokens=tokens['output_tokens'],
+            total_tokens=tokens['total_tokens'],
+            estimated_user_cost=Decimal('0.00'),  # Free when using fallback
+            your_service_fee=your_service_fee,
+            response_time_ms=response_time,
+            success=True,
+            provider=provider,
+            request_type="chat",
+          
+        )
         
         return Response({
             "success": True,
-            "response": response_text,
-            "image_url": result["image_url"],
-            "image_prompt": prompt,
-            "prediction_id": result.get("prediction_id"),
-            "provider": "replicate",
-            "model": result.get("model", "stability-ai/sdxl"),
+            "response": answer,
+            "answer": answer,
+            "usage": {
+                "requests_today": profile.requests_today,
+                "daily_limit": profile.get_tier_limits()['daily_requests'],
+                "tokens_this_month": profile.tokens_this_month,
+                "tier": profile.subscription_tier,
+                "has_api_key": profile.has_api_key(),
+                
+                "using_fallback": using_system_fallback
+            },
             "costs": {
-                "estimated_user_cost": 0.00,
-                "your_service_fee": 0.0005,
-                "is_free": False
-            }
+                "estimated_user_cost": 0.00,  # USER pays nothing when using system fallback
+                "your_service_fee": float(your_service_fee),  # YOUR profit
+                "total_tokens": tokens['total_tokens'],
+                "provider": provider,
+                "is_free": True,  # Always free for user when using system fallback
+                "key_type": key_type if provider == 'openai' else None,
+                "key_source": key_source,
+                "using_system_key": using_system_fallback,
+                "token_info": {
+                    "input_tokens": tokens['input_tokens'],
+                    "output_tokens": tokens['output_tokens'],
+                    "total_tokens": tokens['total_tokens']
+                }
+            },
+            "performance": {
+                "response_time_ms": response_time,
+                "provider": provider
+            },
+            "your_profit": float(your_service_fee)  # YOUR profit from this request
         })
         
-    except Exception as e:
-        print(f"❌ Image generation error: {str(e)}")
-        import traceback
-        traceback.print_exc()
-        
+    except requests.exceptions.Timeout:
+        print("Request timeout!")
+        profile.record_request(tokens=0)
         return Response({
             "success": False,
-            "error": f"Image generation failed: {str(e)}",
-            "suggestion": "Try a different prompt or try again later",
-            "traceback": str(e) if settings.DEBUG else None
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            "error": "Request timeout - AI provider taking too long",
+            "suggestion": "Try a simpler prompt or different model",
+            "using_system_fallback": using_system_fallback,
+            "key_source": key_source
+        }, status=status.HTTP_504_GATEWAY_TIMEOUT)
+        
+    except Exception as e:
+        import traceback
+        print(f"=== EXCEPTION CAUGHT ===")
+        print(f"Error type: {type(e).__name__}")
+        print(f"Error message: {str(e)}")
+        print(f"Traceback:")
+        traceback.print_exc()
+        print(f"=== END TRACEBACK ===")
+        
+        profile.record_request(tokens=0)
+        return Response({
+            "success": False,
+            "error": f"Proxy error: {str(e)[:100]}",
+            "error_type": type(e).__name__,
+            "traceback": traceback.format_exc(),
+            "using_system_fallback": using_system_fallback,
+            "key_source": key_source
+        }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+        
         
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
