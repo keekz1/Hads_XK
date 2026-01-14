@@ -1460,7 +1460,6 @@ class AIConversationList(generics.ListAPIView):
     def get_queryset(self):
         return AIConversation.objects.filter(user=self.request.user).order_by("-created_at")
 
-
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def ai_study_helper(request):
@@ -1554,7 +1553,6 @@ def ai_study_helper(request):
             }
             
             # Use valid dimensions for stable-diffusion-xl-1024-v1-0
-            # Allowed dimensions: 1024x1024, 1152x896, 1216x832, 1344x768, 1536x640, 640x1536, 768x1344, 832x1216, 896x1152
             payload = {
                 "text_prompts": [
                     {
@@ -1567,11 +1565,11 @@ def ai_study_helper(request):
                     }
                 ],
                 "cfg_scale": 7,
-                "height": 1024,  # Changed to valid dimension
-                "width": 1024,   # Changed to valid dimension
+                "height": 1024,
+                "width": 1024,
                 "samples": 1,
                 "steps": 30,
-                "style_preset": "photographic"  # Optional: can be "photographic", "digital-art", etc.
+                "style_preset": "photographic"
             }
             
             print(f"📤 Sending request to Stability AI...")
@@ -1601,11 +1599,31 @@ def ai_study_helper(request):
                 with open(filepath, 'wb') as f:
                     f.write(image_data)
                 
-                # Get image URL
-                base_url = request.build_absolute_uri('/')[:-1]
-                image_url = f"{base_url}{settings.MEDIA_URL}generated_images/{filename}"
+                # FIXED: Create proper image URL
+                # For Railway/Vercel deployment, we need to use the absolute URL
+                if settings.DEBUG:
+                    # Local development
+                    base_url = request.build_absolute_uri('/')[:-1]
+                    image_url = f"{base_url}{settings.MEDIA_URL}generated_images/{filename}"
+                else:
+                    # Production - use the full absolute path
+                    # Get the current domain from request
+                    scheme = 'https' if request.is_secure() else 'http'
+                    host = request.get_host()
+                    base_url = f"{scheme}://{host}"
+                    image_url = f"{base_url}{settings.MEDIA_URL}generated_images/{filename}"
                 
-                print(f"✅ Image saved: {image_url}")
+                print(f"✅ Image saved: {filepath}")
+                print(f"✅ Image URL: {image_url}")
+                print(f"✅ Media URL: {settings.MEDIA_URL}")
+                print(f"✅ Media Root: {settings.MEDIA_ROOT}")
+                
+                # Test if file exists
+                if os.path.exists(filepath):
+                    file_size = os.path.getsize(filepath)
+                    print(f"✅ File exists: {filepath}, Size: {file_size} bytes")
+                else:
+                    print(f"❌ File NOT found: {filepath}")
                 
                 answer = f"""
 🎨 **Image Generated Successfully**
@@ -1650,6 +1668,15 @@ def ai_study_helper(request):
                     "answer": answer,
                     "image_generated": True,
                     "image_url": image_url,
+                    "image_filename": filename,
+                    "file_path": filepath,
+                    "debug_info": {
+                        "media_url": settings.MEDIA_URL,
+                        "media_root": str(settings.MEDIA_ROOT),
+                        "file_exists": os.path.exists(filepath),
+                        "host": request.get_host(),
+                        "scheme": 'https' if request.is_secure() else 'http'
+                    },
                     "response_time_ms": response_time
                 })
                 
@@ -1841,9 +1868,15 @@ def try_stability_ai_with_dimensions(request, profile, image_prompt, original_pr
             with open(filepath, 'wb') as f:
                 f.write(image_data)
             
-            # Get image URL
-            base_url = request.build_absolute_uri('/')[:-1]
-            image_url = f"{base_url}{settings.MEDIA_URL}generated_images/{filename}"
+            # Create proper image URL
+            if settings.DEBUG:
+                base_url = request.build_absolute_uri('/')[:-1]
+                image_url = f"{base_url}{settings.MEDIA_URL}generated_images/{filename}"
+            else:
+                scheme = 'https' if request.is_secure() else 'http'
+                host = request.get_host()
+                base_url = f"{scheme}://{host}"
+                image_url = f"{base_url}{settings.MEDIA_URL}generated_images/{filename}"
             
             print(f"✅ Image saved with dimensions {width}x{height}: {image_url}")
             
@@ -1922,8 +1955,15 @@ def try_stability_ai_with_dimensions(request, profile, image_prompt, original_pr
                         with open(filepath, 'wb') as f:
                             f.write(image_data)
                         
-                        base_url = request.build_absolute_uri('/')[:-1]
-                        image_url = f"{base_url}{settings.MEDIA_URL}generated_images/{filename}"
+                        # Create proper image URL
+                        if settings.DEBUG:
+                            base_url = request.build_absolute_uri('/')[:-1]
+                            image_url = f"{base_url}{settings.MEDIA_URL}generated_images/{filename}"
+                        else:
+                            scheme = 'https' if request.is_secure() else 'http'
+                            host = request.get_host()
+                            base_url = f"{scheme}://{host}"
+                            image_url = f"{base_url}{settings.MEDIA_URL}generated_images/{filename}"
                         
                         answer = f"""
 🎨 **Image Generated Successfully**
@@ -1988,7 +2028,6 @@ def try_stability_ai_with_dimensions(request, profile, image_prompt, original_pr
             "error": "Image generation failed",
             "details": str(e)[:200]
         }, status=500)
-  
 
 
 def try_alternative_image_model(request, profile, image_prompt, original_prompt, difficulty, start_time):
