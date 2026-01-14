@@ -283,7 +283,22 @@ SIMPLE_JWT = {
 
 # === API KEYS & EXTERNAL SERVICES ===
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
- 
+ # === API KEYS & EXTERNAL SERVICES ===
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
+
+# Image Generation APIs
+REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN", "")
+REPLICATE_API_KEY = os.getenv("REPLICATE_API_KEY", "")  # Alternative
+
+# Fallback keys for system use
+GROQ_FALLBACK_KEY = os.getenv("GROQ_FALLBACK_KEY", "")
+OPENAI_FALLBACK_KEY = os.getenv("OPENAI_FALLBACK_KEY", "")
+
+# You may also want to add:
+STABILITY_API_KEY = os.getenv("STABILITY_API_KEY", "")  # For Stability AI
+DALL_E_API_KEY = os.getenv("DALL_E_API_KEY", "")  # For DALL-E if you want to add it later
 # === REDIS CONFIGURATION ===
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 
