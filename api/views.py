@@ -286,7 +286,7 @@ def login_user(request):
 @authentication_classes([JWTAuthentication, SessionAuthentication])
 @permission_classes([IsAuthenticated])
 def generate_image(request):
-    """Generate image using Replicate API with authenticated user"""
+    """Generate image using HuggingFace API with authenticated user"""
     try:
         prompt = request.data.get("prompt", "").strip()
         
@@ -296,39 +296,27 @@ def generate_image(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Get token from settings
-        api_token = getattr(settings, 'REPLICATE_API_TOKEN', None)
+        # Get HuggingFace token from settings
+        hf_token = getattr(settings, 'HUGGINGFACE_TOKEN', None)
         
         # DEBUG: Print token info
-        print(f"🔍 DEBUG: Checking Replicate API token...")
-        print(f"🔍 DEBUG: REPLICATE_API_TOKEN exists in settings: {hasattr(settings, 'REPLICATE_API_TOKEN')}")
-        print(f"🔍 DEBUG: Token value type: {type(api_token)}")
-        print(f"🔍 DEBUG: Token length: {len(api_token) if api_token else 0}")
-        print(f"🔍 DEBUG: Token starts with r8_: {api_token.startswith('r8_') if api_token else False}")
-        print(f"🔍 DEBUG: First 10 chars: {api_token[:10] if api_token else 'None'}")
+        print(f"🔍 DEBUG: Checking HuggingFace API token...")
+        print(f"🔍 DEBUG: HUGGINGFACE_TOKEN exists in settings: {hasattr(settings, 'HUGGINGFACE_TOKEN')}")
+        print(f"🔍 DEBUG: Token value type: {type(hf_token)}")
+        print(f"🔍 DEBUG: Token length: {len(hf_token) if hf_token else 0}")
+        print(f"🔍 DEBUG: First 10 chars: {hf_token[:10] if hf_token else 'None'}")
         
-        if not api_token:
-            print("❌ REPLICATE_API_TOKEN is None or empty")
+        if not hf_token:
+            print("❌ HUGGINGFACE_TOKEN is None or empty")
             return Response(
                 {
                     "success": False,
                     "error": "Image generation service not configured",
-                    "message": "Replicate API token is missing. Please check server configuration.",
-                    "help": "Add REPLICATE_API_TOKEN to environment variables",
-                    "setup_url": "https://replicate.com/account/api-tokens"
+                    "message": "HuggingFace API token is missing. Please check server configuration.",
+                    "help": "Add HUGGINGFACE_TOKEN to environment variables",
+                    "setup_url": "https://huggingface.co/settings/tokens"
                 },
                 status=status.HTTP_503_SERVICE_UNAVAILABLE
-            )
-        
-        if not api_token.startswith('r8_'):
-            print(f"❌ Invalid token format: Should start with 'r8_'")
-            return Response(
-                {
-                    "success": False,
-                    "error": "Invalid API token format",
-                    "message": "Replicate API token should start with 'r8_'"
-                },
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
         
         # Check user's usage limits
@@ -346,109 +334,145 @@ def generate_image(request):
                 }, status=status.HTTP_402_PAYMENT_REQUIRED)
         
         print(f"🖼️ Generating image for user {request.user.username}: {prompt[:50]}...")
-        print(f"🖼️ Using token: {api_token[:10]}...")
+        print(f"🖼️ Using HuggingFace token: {hf_token[:10]}...")
         
         try:
-            # Call Replicate API with timeout
-            print(f"🖼️ Calling Replicate API...")
-            output = replicate.run(
-                "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b",
-                input={
-                    "prompt": prompt,
+            # Call HuggingFace API for Stable Diffusion
+            print(f"🖼️ Calling HuggingFace API...")
+            
+            # Using Stable Diffusion model
+            model_id = "stabilityai/stable-diffusion-xl-base-1.0"
+            api_url = f"https://api-inference.huggingface.co/models/{model_id}"
+            
+            headers = {
+                "Authorization": f"Bearer {hf_token}",
+                "Content-Type": "application/json"
+            }
+            
+            payload = {
+                "inputs": prompt,
+                "parameters": {
                     "negative_prompt": "blurry, low quality, distorted, watermark, text, ugly, bad anatomy",
                     "width": 1024,
                     "height": 1024,
-                    "num_outputs": 1,
-                    "guidance_scale": 7.5,
-                    "num_inference_steps": 25
+                    "num_inference_steps": 25,
+                    "guidance_scale": 7.5
                 },
-                api_token=api_token
-            )
-            
-            print(f"✅ Replicate API call successful")
-            print(f"✅ Output type: {type(output)}")
-            print(f"✅ Output: {output}")
-            
-            # Process output
-            if isinstance(output, list) and len(output) > 0:
-                image_url = output[0]
-            elif isinstance(output, str):
-                image_url = output
-            else:
-                # Try to extract URL from any output format
-                image_url = str(output)
-            
-            print(f"✅ Image URL: {image_url}")
-            
-            # Update user's image generation count if tracking
-            if hasattr(profile, 'image_generations_this_month'):
-                profile.image_generations_this_month += 1
-                profile.save()
-            
-            # Log the image generation with safe field creation
-            conversation_data = {
-                'user': request.user,
-                'prompt': f"Generate image: {prompt}",
-                'response': f"Image generated successfully. URL: {image_url}",
-                'subject': "Image Generation",
-                'difficulty': "medium",
-                'user_tier_at_time': profile.subscription_tier,
-                'model_used': "stability-ai/sdxl",
-                'api_provider': "replicate",
+                "options": {
+                    "use_cache": True,
+                    "wait_for_model": True
+                }
             }
             
-            # Only add image fields if they exist in the model
-            if hasattr(AIConversation, 'is_image_generation'):
-                conversation_data['is_image_generation'] = True
-            if hasattr(AIConversation, 'image_url'):
-                conversation_data['image_url'] = image_url
+            response = requests.post(api_url, headers=headers, json=payload, timeout=60)
             
-            conversation = AIConversation.objects.create(**conversation_data)
-            
-            return Response({
-                "success": True,
-                "image_url": image_url,
-                "prompt": prompt,
-                "message": "Image generated successfully",
-                "image_html": f'<img src="{image_url}" alt="{prompt[:50]}" style="max-width:100%; border-radius:8px;" />',
-                "markdown": f"![{prompt[:50]}...]({image_url})",
-                "debug": {
-                    "token_configured": True,
-                    "token_length": len(api_token),
-                    "output_type": type(output).__name__
+            if response.status_code == 200:
+                print(f"✅ HuggingFace API call successful")
+                
+                # Save the image locally
+                image_data = response.content
+                
+                # Generate a unique filename
+                filename = f"generated_{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
+                filepath = os.path.join(settings.MEDIA_ROOT, 'generated_images', filename)
+                
+                # Ensure directory exists
+                os.makedirs(os.path.dirname(filepath), exist_ok=True)
+                
+                # Save image
+                with open(filepath, 'wb') as f:
+                    f.write(image_data)
+                
+                # Create URL for the image
+                image_url = f"{settings.MEDIA_URL}generated_images/{filename}"
+                
+                print(f"✅ Image saved: {image_url}")
+                
+                # Update user's image generation count if tracking
+                if hasattr(profile, 'image_generations_this_month'):
+                    profile.image_generations_this_month += 1
+                    profile.save()
+                
+                # Log the image generation
+                conversation_data = {
+                    'user': request.user,
+                    'prompt': f"Generate image: {prompt}",
+                    'response': f"Image generated successfully. URL: {image_url}",
+                    'subject': "Image Generation",
+                    'difficulty': "medium",
+                    'user_tier_at_time': profile.subscription_tier,
+                    'model_used': model_id,
+                    'api_provider': "huggingface",
                 }
-            })
-            
-        except replicate.exceptions.ReplicateError as e:
-            print(f"❌ Replicate API error: {e}")
-            error_details = str(e)
-            
-            if "authentication" in error_details.lower() or "token" in error_details.lower():
+                
+                # Only add image fields if they exist in the model
+                if hasattr(AIConversation, 'is_image_generation'):
+                    conversation_data['is_image_generation'] = True
+                if hasattr(AIConversation, 'image_url'):
+                    conversation_data['image_url'] = image_url
+                
+                conversation = AIConversation.objects.create(**conversation_data)
+                
+                return Response({
+                    "success": True,
+                    "image_url": image_url,
+                    "image_data_base64": None,
+                    "prompt": prompt,
+                    "message": "Image generated successfully",
+                    "image_html": f'<img src="{image_url}" alt="{prompt[:50]}" style="max-width:100%; border-radius:8px;" />',
+                    "markdown": f"![{prompt[:50]}...]({image_url})",
+                    "debug": {
+                        "provider": "huggingface",
+                        "model": model_id,
+                        "status_code": response.status_code
+                    }
+                })
+                
+            elif response.status_code == 503:
+                # Model is loading
+                estimated_time = response.json().get("estimated_time", 30)
                 return Response({
                     "success": False,
-                    "error": "Invalid Replicate API token",
-                    "details": "The API token is invalid or expired. Please check your Replicate account.",
-                    "help": "Get a new token from https://replicate.com/account/api-tokens",
-                    "original_error": error_details[:200]
+                    "error": "Model is loading",
+                    "message": f"The model is currently loading. Please try again in {estimated_time} seconds.",
+                    "estimated_time": estimated_time
+                }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
+                
+            elif response.status_code == 401:
+                return Response({
+                    "success": False,
+                    "error": "Invalid HuggingFace API token",
+                    "details": "The API token is invalid or expired.",
+                    "help": "Get a new token from https://huggingface.co/settings/tokens"
                 }, status=status.HTTP_401_UNAUTHORIZED)
-            elif "quota" in error_details.lower() or "credit" in error_details.lower():
+                
+            elif response.status_code == 402:
                 return Response({
                     "success": False,
-                    "error": "Insufficient credits",
-                    "details": "Your Replicate account has insufficient credits.",
-                    "help": "Add credits to your Replicate account",
-                    "original_error": error_details[:200]
+                    "error": "Payment required",
+                    "details": "Your HuggingFace account needs payment.",
+                    "help": "Check your billing at https://huggingface.co/settings/billing"
                 }, status=status.HTTP_402_PAYMENT_REQUIRED)
+                
             else:
+                error_msg = response.json().get("error", f"API error: {response.status_code}")
                 return Response({
                     "success": False,
-                    "error": "Replicate API error",
-                    "details": error_details[:200],
-                    "help": "Check Replicate status: https://status.replicate.com/"
+                    "error": "HuggingFace API error",
+                    "details": error_msg,
+                    "status_code": response.status_code
                 }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
                 
+        except requests.exceptions.Timeout:
+            return Response({
+                "success": False,
+                "error": "Request timeout",
+                "details": "The image generation request timed out. Please try again.",
+                "help": "Try a simpler prompt or try again later."
+            }, status=status.HTTP_504_GATEWAY_TIMEOUT)
+            
         except Exception as e:
-            print(f"❌ Unexpected error during Replicate call: {e}")
+            print(f"❌ Unexpected error during HuggingFace call: {e}")
             import traceback
             traceback.print_exc()
             return Response({
@@ -456,8 +480,7 @@ def generate_image(request):
                 "error": "Image generation failed",
                 "details": str(e)[:200],
                 "debug": {
-                    "token_configured": True,
-                    "token_length": len(api_token),
+                    "token_configured": bool(hf_token),
                     "error_type": type(e).__name__
                 }
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -1471,21 +1494,23 @@ class AIConversationList(generics.ListAPIView):
         return AIConversation.objects.filter(user=self.request.user).order_by("-created_at")
 
 
-
-import os
-from django.conf import settings
-
-
-# Update the image generation section in ai_study_helper function
-
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def ai_study_helper(request):
     """Main AI chat endpoint with image generation + proxy AI support"""
+
+    import os
+    import time
+    import requests
+    import replicate
+    from decimal import Decimal
+    from django.conf import settings
+
     print("=== AI CHAT REQUEST STARTED ===")
     start_time = time.time()
 
     # ================= REQUEST DATA =================
+
     prompt = request.data.get("prompt", "").strip()
     subject = request.data.get("subject", "General")
     difficulty = request.data.get("difficulty", "Beginner")
@@ -1498,6 +1523,7 @@ def ai_study_helper(request):
         return Response({"error": "Prompt is required"}, status=400)
 
     # ================= IMAGE DETECTION =================
+
     def detect_image_request(text):
         keywords = [
             "generate image", "create image", "make image", "draw", "sketch",
@@ -1523,6 +1549,7 @@ def ai_study_helper(request):
         return f"{cleaned}, high quality, detailed, professional"
 
     # ================= USER PROFILE =================
+
     try:
         profile = request.user.userprofile
         print(f"Profile found: {profile.subscription_tier}")
@@ -1530,6 +1557,7 @@ def ai_study_helper(request):
         profile = UserProfile.objects.create(user=request.user, level="beginner")
 
     # ================= IMAGE GENERATION (UPDATED FOR HUGGINGFACE) =================
+
     if detect_image_request(prompt):
         print("🎨 Image generation request detected")
 
@@ -1665,52 +1693,83 @@ def ai_study_helper(request):
                 "details": str(e)
             }, status=500)
 
-@api_view(['POST'])
-@permission_classes([IsAuthenticated])
-def setup_huggingface_key(request):
-    """Setup HuggingFace API key"""
-    api_key = request.data.get('api_key', '').strip()
-    
+    # ================= NORMAL AI CHAT =================
+
+    print("💬 Normal AI chat request")
+
+    api_key = profile.get_api_key()
+    using_system_fallback = False
+
     if not api_key:
-        return Response({"error": "API key required"}, status=400)
-    
-    profile = request.user.userprofile
-    
-    # Test HuggingFace key
-    try:
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
-        
-        # Test with models list
-        response = requests.get(
-            "https://huggingface.co/api/models",
-            headers=headers,
-            timeout=10
-        )
-        
-        if response.status_code == 200:
-            profile.huggingface_api_key = api_key
-            profile.save()
-            
-            return Response({
-                "success": True,
-                "message": "HuggingFace API key saved and tested",
-                "provider": "huggingface",
-                "has_api_key": True
-            })
+        using_system_fallback = True
+
+        if profile.preferred_provider == "groq":
+            api_key = os.getenv("GROQ_API_KEY") or os.getenv("GROQ_FALLBACK_KEY")
         else:
-            return Response({
-                "success": False,
-                "error": f"Invalid API key: {response.status_code}"
-            }, status=400)
-            
-    except requests.exceptions.RequestException as e:
+            api_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_FALLBACK_KEY")
+
+    if not api_key:
         return Response({
             "success": False,
-            "error": f"Connection error: {str(e)}"
-        }, status=400)
+            "error": "API key not configured",
+            "message": "Please add your API key in profile settings"
+        }, status=402)
+
+    if not model:
+        model = profile.preferred_model
+
+    messages = [{"role": "user", "content": prompt}]
+
+    if profile.preferred_provider == "openai":
+        url = "https://api.openai.com/v1/chat/completions"
+    else:
+        url = "https://api.groq.com/openai/v1/chat/completions"
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.7,
+        "max_tokens": 2000
+    }
+
+    response = requests.post(url, headers=headers, json=payload, timeout=30)
+    response_data = response.json()
+    response_time = int((time.time() - start_time) * 1000)
+
+    if response.status_code != 200:
+        return Response({
+            "success": False,
+            "error": response_data
+        }, status=response.status_code)
+
+    answer = response_data["choices"][0]["message"]["content"]
+
+    AIConversation.objects.create(
+        user=request.user,
+        prompt=prompt,
+        response=answer,
+        subject=subject,
+        difficulty=difficulty,
+        user_tier_at_time=profile.subscription_tier,
+        model_used=model,
+        api_provider=profile.preferred_provider,
+        response_time_ms=response_time
+    )
+
+    profile.record_request(tokens=200)
+
+    return Response({
+        "success": True,
+        "answer": answer,
+        "provider": profile.preferred_provider,
+        "using_fallback": using_system_fallback,
+        "response_time_ms": response_time
+    })
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
