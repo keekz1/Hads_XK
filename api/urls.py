@@ -13,7 +13,8 @@ urlpatterns = [
     path('login/', views.login_user, name='login'),  # Frontend calls /api/login/
     path('register/', views.register, name='register'),  # Frontend calls /api/register/
     
-    
+    path('generate-image/', views.generate_ai_image, name='generate_ai_image'),  # Updated view name
+    path('ai-generate-image/', views.generate_ai_image, name='ai_generate_image'),  # Alternative endpoint
     
     # === OTHER AUTH ENDPOINTS ===
     path('logout/', views.logout_user, name='logout'),

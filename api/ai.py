@@ -878,3 +878,348 @@ def get_groq_setup_instructions(user_email):
         "api_keys_url": "https://console.groq.com/keys",
         "referral_id": referral_id
     }
+    # ===== IMAGE GENERATION INTEGRATION =====
+
+def detect_image_request(prompt):
+    """Check if user wants an image generated"""
+    image_keywords = [
+        'generate image', 'create image', 'make a picture', 'draw a picture',
+        'show me an image', 'visualize', 'picture of', 'photo of', 'image of',
+        'generate a picture', 'create a picture', 'make an image',
+        'draw', 'paint', 'sketch', 'illustration', 'diagram', 'graphic',
+        'can you show me', 'show me', 'picture', 'image', 'art', 'painting',
+        'logo', 'poster', 'banner', 'infographic', 'chart', 'map'
+    ]
+    
+    prompt_lower = prompt.lower().strip()
+    
+    # Check for image keywords
+    for keyword in image_keywords:
+        if keyword in prompt_lower:
+            return True
+    
+    # Check for patterns like "generate an image of X"
+    if ('generate' in prompt_lower or 'create' in prompt_lower or 'make' in prompt_lower) and \
+       ('image' in prompt_lower or 'picture' in prompt_lower or 'draw' in prompt_lower):
+        return True
+    
+    return False
+
+
+def extract_image_prompt(original_prompt):
+    """Extract the image description from the user's prompt"""
+    prompt_lower = original_prompt.lower()
+    
+    # Remove common image request phrases
+    remove_phrases = [
+        'generate image of', 'create image of', 'make a picture of',
+        'draw a picture of', 'show me an image of', 'visualize',
+        'generate a picture of', 'create a picture of', 'make an image of',
+        'draw', 'paint', 'sketch', 'illustration of', 'diagram of',
+        'generate', 'create', 'make', 'show me', 'picture of', 'image of'
+    ]
+    
+    cleaned_prompt = original_prompt
+    for phrase in remove_phrases:
+        if phrase in prompt_lower:
+            # Replace the phrase with empty string
+            cleaned_prompt = cleaned_prompt.replace(phrase, '').replace(phrase.capitalize(), '')
+    
+    # Clean up extra spaces and punctuation
+    cleaned_prompt = cleaned_prompt.strip()
+    cleaned_prompt = cleaned_prompt.strip(' ,.!?;:-')
+    
+    # If empty after cleaning, use original
+    if not cleaned_prompt or len(cleaned_prompt) < 3:
+        return original_prompt
+    
+    # Add quality improvements
+    enhanced_prompt = f"{cleaned_prompt}, high quality, detailed, professional"
+    
+    # Add context based on keywords
+    if 'diagram' in prompt_lower or 'chart' in prompt_lower:
+        enhanced_prompt += ", educational, labeled, clear"
+    elif 'logo' in prompt_lower:
+        enhanced_prompt += ", minimalist, modern, professional logo design"
+    elif 'poster' in prompt_lower or 'banner' in prompt_lower:
+        enhanced_prompt += ", eye-catching, professional design"
+    elif 'art' in prompt_lower or 'painting' in prompt_lower:
+        enhanced_prompt += ", artistic, creative"
+    
+    return enhanced_prompt
+
+
+def generate_image_with_replicate_api(prompt, api_token=None):
+    """
+    Generate image using Replicate API
+    This will be called when user asks for image generation
+    """
+    try:
+        # Get Replicate API token
+        if not api_token:
+            api_token = getattr(settings, 'REPLICATE_API_TOKEN', None)
+            if not api_token:
+                raise ValueError("Replicate API token not configured")
+        
+        import requests
+        
+        url = "https://api.replicate.com/v1/predictions"
+        headers = {
+            "Authorization": f"Token {api_token}",
+            "Content-Type": "application/json"
+        }
+        
+        # Use Stable Diffusion XL
+        payload = {
+            "version": "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b",
+            "input": {
+                "prompt": prompt,
+                "negative_prompt": "blurry, low quality, distorted, watermark, text, ugly, bad anatomy, deformed",
+                "width": 1024,
+                "height": 1024,
+                "num_outputs": 1,
+                "guidance_scale": 7.5,
+                "num_inference_steps": 25
+            }
+        }
+        
+        print(f"🖼️ Calling Replicate API: {prompt[:80]}...")
+        
+        response = requests.post(url, headers=headers, json=payload, timeout=30)
+        
+        if response.status_code != 201:
+            error_data = response.json()
+            raise Exception(f"Replicate error: {error_data.get('detail', 'Unknown error')}")
+        
+        data = response.json()
+        prediction_id = data.get('id')
+        
+        # Poll for result
+        result_url = f"https://api.replicate.com/v1/predictions/{prediction_id}"
+        
+        for i in range(20):  # 20 attempts, 3 seconds each = 60 seconds max
+            import time
+            time.sleep(3)
+            
+            status_response = requests.get(result_url, headers=headers)
+            status_data = status_response.json()
+            status = status_data.get('status')
+            
+            if status == 'succeeded':
+                output = status_data.get('output', [])
+                if output and isinstance(output, list) and len(output) > 0:
+                    image_url = output[0]
+                    print(f"✅ Image generated: {image_url[:50]}...")
+                    return {
+                        "success": True,
+                        "image_url": image_url,
+                        "prediction_id": prediction_id,
+                        "prompt": prompt,
+                        "provider": "replicate",
+                        "model": "stability-ai/sdxl"
+                    }
+            
+            elif status in ['failed', 'canceled']:
+                error = status_data.get('error', 'Unknown error')
+                raise Exception(f"Image generation {status}: {error}")
+        
+        raise Exception("Image generation timed out")
+        
+    except Exception as e:
+        raise Exception(f"Image generation failed: {str(e)}")
+
+
+# ===== UPDATED ASK_AI FUNCTION WITH IMAGE GENERATION =====
+
+def ask_ai_with_image_support(user_id, conversation, subject=None, difficulty=None, 
+                             provider="groq", api_key=None, model=None, user_profile=None):
+    """
+    Enhanced ask_ai function that detects image requests and handles them
+    """
+    if not conversation or not isinstance(conversation, list):
+        conversation = []
+    
+    # Get last user message
+    last_user_msg = next(
+        (msg.get("content") for msg in reversed(conversation) if msg.get("role") == "user"),
+        ""
+    )
+    
+    # Check if user wants an image
+    if detect_image_request(last_user_msg):
+        print(f"🖼️ Detected image request: {last_user_msg[:80]}...")
+        
+        try:
+            # Extract image prompt
+            image_prompt = extract_image_prompt(last_user_msg)
+            print(f"🖼️ Image prompt: {image_prompt}")
+            
+            # Generate image
+            result = generate_image_with_replicate_api(image_prompt)
+            
+            # Format response
+            answer = f"🎨 **I've generated an image for you!**\n\n"
+            answer += f"**Prompt:** {image_prompt}\n\n"
+            answer += f"![Generated Image]({result['image_url']})\n\n"
+            answer += f"**Tips:**\n"
+            answer += f"• Click the image to view full size\n"
+            answer += f"• Right-click to save/download\n"
+            answer += f"• For better results, be specific with your descriptions\n\n"
+            answer += f"*Image generated using Stable Diffusion XL*"
+            
+            return {
+                "answer": answer,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_tokens": 0,
+                "response_time_ms": 0,
+                "image_generated": True,
+                "image_url": result["image_url"],
+                "image_prompt": image_prompt,
+                "provider": "replicate",
+                "model": "stability-ai/sdxl",
+                "estimated_user_cost": Decimal('0.00'),
+                "your_service_fee": Decimal('0.0005'),  # Higher fee for images
+                "is_free": False,  # Images cost credits
+                "is_image_response": True
+            }
+            
+        except Exception as e:
+            # If image generation fails, fall back to text response
+            print(f"⚠️ Image generation failed, falling back to text: {e}")
+            
+            # Ask the AI to respond about the image request
+            fallback_prompt = f"The user asked: '{last_user_msg}' but image generation failed with error: {str(e)[:100]}. Please respond naturally and suggest they try a text-based query instead."
+            
+            conversation_with_fallback = conversation.copy()
+            if conversation_with_fallback:
+                conversation_with_fallback[-1] = {"role": "user", "content": fallback_prompt}
+            else:
+                conversation_with_fallback = [{"role": "user", "content": fallback_prompt}]
+            
+            # Call original ask_ai function
+            return ask_ai(
+                user_id=user_id,
+                conversation=conversation_with_fallback,
+                subject=subject,
+                difficulty=difficulty,
+                provider=provider,
+                api_key=api_key,
+                model=model
+            )
+    
+    # If not an image request, use original function
+    return ask_ai(
+        user_id=user_id,
+        conversation=conversation,
+        subject=subject,
+        difficulty=difficulty,
+        provider=provider,
+        api_key=api_key,
+        model=model
+    )
+
+
+# ===== UPDATED PROXY_AI_REQUEST WITH IMAGE SUPPORT =====
+
+def proxy_ai_request_with_images(user, prompt, subject=None, difficulty=None, model=None):
+    """
+    Enhanced proxy function that supports image generation
+    """
+    try:
+        profile = user.userprofile
+        user_api_key = profile.get_api_key()
+        provider = profile.preferred_provider
+        
+        # Check if this is an image request
+        if detect_image_request(prompt):
+            print(f"🎨 User {user.username} requested image generation")
+            
+            # Extract image prompt
+            image_prompt = extract_image_prompt(prompt)
+            
+            try:
+                # Generate image
+                result = generate_image_with_replicate_api(image_prompt)
+                
+                return {
+                    "success": True,
+                    "response": f"🎨 **Image Generated!**\n\n![{image_prompt}]({result['image_url']})\n\n**Prompt:** {image_prompt}\n\n*Click image to view full size*",
+                    "answer": f"🎨 **Image Generated!**\n\n![{image_prompt}]({result['image_url']})\n\n**Prompt:** {image_prompt}\n\n*Click image to view full size*",
+                    "image_generated": True,
+                    "image_url": result["image_url"],
+                    "image_prompt": image_prompt,
+                    "provider": "replicate",
+                    "model": "stability-ai/sdxl",
+                    "using_system_fallback": True,  # Always using system key for images
+                    "key_source": "system_fallback",
+                    "is_image_response": True,
+                    "costs": {
+                        "estimated_user_cost": 0.00,
+                        "your_service_fee": 0.0005,
+                        "provider": "replicate",
+                        "is_free": False,
+                        "using_system_key": True
+                    }
+                }
+                
+            except Exception as e:
+                # If image generation fails, fall back to text
+                error_msg = str(e)
+                print(f"❌ Image generation failed: {error_msg}")
+                
+                # Use the enhanced function which will handle fallback
+                result = ask_ai_with_image_support(
+                    user_id=user.id,
+                    conversation=[{"role": "user", "content": prompt}],
+                    subject=subject,
+                    difficulty=difficulty,
+                    provider=provider,
+                    api_key=user_api_key or get_system_fallback_key(provider),
+                    model=model or profile.preferred_model,
+                    user_profile=profile
+                )
+                
+                result["success"] = True
+                result["image_generation_failed"] = True
+                result["image_error"] = error_msg[:100]
+                return result
+        
+        # If not an image request, use enhanced function
+        result = ask_ai_with_image_support(
+            user_id=user.id,
+            conversation=[{"role": "user", "content": prompt}],
+            subject=subject,
+            difficulty=difficulty,
+            provider=provider,
+            api_key=user_api_key or get_system_fallback_key(provider),
+            model=model or profile.preferred_model,
+            user_profile=profile
+        )
+        
+        # Add metadata
+        result["success"] = True
+        result["key_source"] = "user" if user_api_key else "system_fallback"
+        result["using_system_fallback"] = not user_api_key
+        result["user_has_own_key"] = bool(user_api_key)
+        
+        if provider == "groq":
+            result["is_free"] = True
+            result["free_tier_info"] = "5,000,000 tokens/month free"
+        
+        return result
+        
+    except Exception as e:
+        error_msg = str(e)
+        print(f"AI request error for {user.username}: {error_msg}")
+        
+        return {
+            "success": False,
+            "error": error_msg,
+            "requires_setup": "invalid" in error_msg.lower() or "key" in error_msg.lower(),
+            "provider": getattr(user, 'userprofile', {}).get('preferred_provider', 'groq'),
+            "is_groq": getattr(user, 'userprofile', {}).get('preferred_provider', 'groq') == 'groq'
+        }
+
+
+ 

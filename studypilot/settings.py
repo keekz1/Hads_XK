@@ -283,7 +283,11 @@ SIMPLE_JWT = {
 
 # === API KEYS & EXTERNAL SERVICES ===
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN", "")
 
+# Verify token exists
+if not REPLICATE_API_TOKEN:
+    print("⚠️ WARNING: REPLICATE_API_TOKEN not found in environment variables!")
 # === REDIS CONFIGURATION ===
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 
