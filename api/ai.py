@@ -177,6 +177,7 @@ Provide a detailed analysis covering key points, themes, structure, and signific
             "analysis": None,
             "using_system_fallback": using_system_fallback
         }
+      
 @staticmethod
 def calculate_cost(input_tokens, output_tokens, model="llama-3.1-8b-instant", provider="groq"):
     """
