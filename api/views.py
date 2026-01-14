@@ -286,7 +286,7 @@ def login_user(request):
 @authentication_classes([JWTAuthentication, SessionAuthentication])
 @permission_classes([IsAuthenticated])
 def generate_image(request):
-    """Generate image using HuggingFace API with authenticated user"""
+    """Generate image using Stability AI API with authenticated user"""
     try:
         prompt = request.data.get("prompt", "").strip()
         
@@ -296,81 +296,71 @@ def generate_image(request):
                 status=status.HTTP_400_BAD_REQUEST
             )
         
-        # Get HuggingFace token from settings
-        hf_token = getattr(settings, 'HUGGINGFACE_TOKEN', None)
+        # Get Stability AI token from settings
+        stability_token = getattr(settings, 'STABILITY_API_KEY', None)
         
-        # DEBUG: Print token info
-        print(f"🔍 DEBUG: Checking HuggingFace API token...")
-        print(f"🔍 DEBUG: HUGGINGFACE_TOKEN exists in settings: {hasattr(settings, 'HUGGINGFACE_TOKEN')}")
-        print(f"🔍 DEBUG: Token value type: {type(hf_token)}")
-        print(f"🔍 DEBUG: Token length: {len(hf_token) if hf_token else 0}")
-        print(f"🔍 DEBUG: First 10 chars: {hf_token[:10] if hf_token else 'None'}")
+        print(f"🔍 DEBUG: Checking Stability AI API token...")
+        print(f"🔍 DEBUG: STABILITY_API_KEY exists in settings: {hasattr(settings, 'STABILITY_API_KEY')}")
+        print(f"🔍 DEBUG: Token configured: {bool(stability_token)}")
         
-        if not hf_token:
-            print("❌ HUGGINGFACE_TOKEN is None or empty")
+        if not stability_token or stability_token == "":
+            print("❌ STABILITY_API_KEY is not configured")
             return Response(
                 {
                     "success": False,
                     "error": "Image generation service not configured",
-                    "message": "HuggingFace API token is missing. Please check server configuration.",
-                    "help": "Add HUGGINGFACE_TOKEN to environment variables",
-                    "setup_url": "https://huggingface.co/settings/tokens"
+                    "message": "Stability AI API token is missing. Please check server configuration.",
+                    "help": "Add STABILITY_API_KEY to environment variables",
+                    "setup_url": "https://platform.stability.ai/"
                 },
                 status=status.HTTP_503_SERVICE_UNAVAILABLE
             )
         
         # Check user's usage limits
         profile = request.user.userprofile
-        tier_limits = profile.get_tier_limits()
-        
-        # Add image generation limit check if needed
-        if hasattr(profile, 'image_generations_this_month'):
-            if profile.image_generations_this_month >= tier_limits.get('image_limit', 0):
-                return Response({
-                    "error": "Image generation limit reached",
-                    "limit": tier_limits.get('image_limit', 0),
-                    "used": profile.image_generations_this_month,
-                    "upgrade_url": "/plans/"
-                }, status=status.HTTP_402_PAYMENT_REQUIRED)
         
         print(f"🖼️ Generating image for user {request.user.username}: {prompt[:50]}...")
-        print(f"🖼️ Using HuggingFace token: {hf_token[:10]}...")
         
         try:
-            # Call HuggingFace API for Stable Diffusion
-            print(f"🖼️ Calling HuggingFace API...")
+            # Call Stability AI API
+            print(f"🖼️ Calling Stability AI API...")
             
-            # Using Stable Diffusion model
-            model_id = "stabilityai/stable-diffusion-xl-base-1.0"
-            api_url = f"https://api-inference.huggingface.co/models/{model_id}"
+            url = "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image"
             
             headers = {
-                "Authorization": f"Bearer {hf_token}",
-                "Content-Type": "application/json"
+                "Authorization": f"Bearer {stability_token}",
+                "Content-Type": "application/json",
+                "Accept": "application/json"
             }
             
             payload = {
-                "inputs": prompt,
-                "parameters": {
-                    "negative_prompt": "blurry, low quality, distorted, watermark, text, ugly, bad anatomy",
-                    "width": 1024,
-                    "height": 1024,
-                    "num_inference_steps": 25,
-                    "guidance_scale": 7.5
-                },
-                "options": {
-                    "use_cache": True,
-                    "wait_for_model": True
-                }
+                "text_prompts": [
+                    {
+                        "text": prompt,
+                        "weight": 1
+                    },
+                    {
+                        "text": "blurry, low quality, distorted, watermark, text, ugly, bad anatomy",
+                        "weight": -1
+                    }
+                ],
+                "cfg_scale": 7,
+                "height": 1024,
+                "width": 1024,
+                "samples": 1,
+                "steps": 30,
             }
             
-            response = requests.post(api_url, headers=headers, json=payload, timeout=60)
+            response = requests.post(url, headers=headers, json=payload, timeout=60)
             
             if response.status_code == 200:
-                print(f"✅ HuggingFace API call successful")
+                print(f"✅ Stability AI API call successful")
                 
-                # Save the image locally
-                image_data = response.content
+                import base64
+                data = response.json()
+                
+                # Decode base64 image
+                image_data = base64.b64decode(data["artifacts"][0]["base64"])
                 
                 # Generate a unique filename
                 filename = f"generated_{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
@@ -388,12 +378,7 @@ def generate_image(request):
                 
                 print(f"✅ Image saved: {image_url}")
                 
-                # Update user's image generation count if tracking
-                if hasattr(profile, 'image_generations_this_month'):
-                    profile.image_generations_this_month += 1
-                    profile.save()
-                
-                # Log the image generation
+                # Create conversation record
                 conversation_data = {
                     'user': request.user,
                     'prompt': f"Generate image: {prompt}",
@@ -401,11 +386,11 @@ def generate_image(request):
                     'subject': "Image Generation",
                     'difficulty': "medium",
                     'user_tier_at_time': profile.subscription_tier,
-                    'model_used': model_id,
-                    'api_provider': "huggingface",
+                    'model_used': "stable-diffusion-xl-1024-v1-0",
+                    'api_provider': "stability-ai",
                 }
                 
-                # Only add image fields if they exist in the model
+                # Add image fields if they exist
                 if hasattr(AIConversation, 'is_image_generation'):
                     conversation_data['is_image_generation'] = True
                 if hasattr(AIConversation, 'image_url'):
@@ -416,63 +401,44 @@ def generate_image(request):
                 return Response({
                     "success": True,
                     "image_url": image_url,
-                    "image_data_base64": None,
                     "prompt": prompt,
                     "message": "Image generated successfully",
                     "image_html": f'<img src="{image_url}" alt="{prompt[:50]}" style="max-width:100%; border-radius:8px;" />',
                     "markdown": f"![{prompt[:50]}...]({image_url})",
                     "debug": {
-                        "provider": "huggingface",
-                        "model": model_id,
+                        "provider": "stability-ai",
+                        "model": "stable-diffusion-xl-1024-v1-0",
                         "status_code": response.status_code
                     }
                 })
                 
-            elif response.status_code == 503:
-                # Model is loading
-                estimated_time = response.json().get("estimated_time", 30)
-                return Response({
-                    "success": False,
-                    "error": "Model is loading",
-                    "message": f"The model is currently loading. Please try again in {estimated_time} seconds.",
-                    "estimated_time": estimated_time
-                }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-                
             elif response.status_code == 401:
                 return Response({
                     "success": False,
-                    "error": "Invalid HuggingFace API token",
+                    "error": "Invalid Stability AI API token",
                     "details": "The API token is invalid or expired.",
-                    "help": "Get a new token from https://huggingface.co/settings/tokens"
+                    "help": "Get a new token from https://platform.stability.ai/account/keys"
                 }, status=status.HTTP_401_UNAUTHORIZED)
                 
             elif response.status_code == 402:
                 return Response({
                     "success": False,
-                    "error": "Payment required",
-                    "details": "Your HuggingFace account needs payment.",
-                    "help": "Check your billing at https://huggingface.co/settings/billing"
+                    "error": "Credits exhausted",
+                    "details": "Your Stability AI credits have been used up.",
+                    "help": "Check your credits at https://platform.stability.ai/account"
                 }, status=status.HTTP_402_PAYMENT_REQUIRED)
                 
             else:
-                error_msg = response.json().get("error", f"API error: {response.status_code}")
+                error_msg = response.text[:200] if response.text else f"API error: {response.status_code}"
                 return Response({
                     "success": False,
-                    "error": "HuggingFace API error",
+                    "error": "Stability AI API error",
                     "details": error_msg,
                     "status_code": response.status_code
                 }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
                 
-        except requests.exceptions.Timeout:
-            return Response({
-                "success": False,
-                "error": "Request timeout",
-                "details": "The image generation request timed out. Please try again.",
-                "help": "Try a simpler prompt or try again later."
-            }, status=status.HTTP_504_GATEWAY_TIMEOUT)
-            
         except Exception as e:
-            print(f"❌ Unexpected error during HuggingFace call: {e}")
+            print(f"❌ Unexpected error during Stability AI call: {e}")
             import traceback
             traceback.print_exc()
             return Response({
@@ -480,7 +446,7 @@ def generate_image(request):
                 "error": "Image generation failed",
                 "details": str(e)[:200],
                 "debug": {
-                    "token_configured": bool(hf_token),
+                    "token_configured": bool(stability_token),
                     "error_type": type(e).__name__
                 }
             }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
@@ -493,6 +459,7 @@ def generate_image(request):
             "success": False,
             "error": f"Server error: {str(e)[:100]}"
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+ 
         
 @api_view(['POST'])
 @permission_classes([AllowAny])
