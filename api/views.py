@@ -282,35 +282,102 @@ def login_user(request):
         )
         
         
-@csrf_exempt
+@api_view(['POST'])
+@authentication_classes([JWTAuthentication, SessionAuthentication])
+@permission_classes([IsAuthenticated])
 def generate_image(request):
-    if request.method == "POST":
-        try:
-            data = json.loads(request.body)
-            prompt = data.get("prompt", "")
-            
-            # Get token from settings
-            api_token = settings.REPLICATE_API_TOKEN
-            
-            # Call Replicate
-            output = replicate.run(
-                "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b",
-                input={"prompt": prompt},
-                api_token=api_token
+    """Generate image using Replicate API with authenticated user"""
+    try:
+        prompt = request.data.get("prompt", "").strip()
+        
+        if not prompt:
+            return Response(
+                {"error": "Image prompt is required"},
+                status=status.HTTP_400_BAD_REQUEST
             )
-            
-            return JsonResponse({
-                "success": True,
-                "image_url": output[0] if isinstance(output, list) else output
-            })
-            
-        except Exception as e:
-            return JsonResponse({
-                "success": False,
-                "error": str(e)
-            }, status=500)
-    
-    return JsonResponse({"error": "Method not allowed"}, status=405)
+        
+        # Get token from settings
+        api_token = getattr(settings, 'REPLICATE_API_TOKEN', None)
+        
+        if not api_token:
+            return Response(
+                {"error": "Replicate API token not configured on server"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE
+            )
+        
+        # Check user's usage limits
+        profile = request.user.userprofile
+        tier_limits = profile.get_tier_limits()
+        
+        # Add image generation limit check if needed
+        if hasattr(profile, 'image_generations_this_month'):
+            if profile.image_generations_this_month >= tier_limits.get('image_limit', 0):
+                return Response({
+                    "error": "Image generation limit reached",
+                    "limit": tier_limits.get('image_limit', 0),
+                    "used": profile.image_generations_this_month,
+                    "upgrade_url": "/plans/"
+                }, status=status.HTTP_402_PAYMENT_REQUIRED)
+        
+        print(f"🖼️ Generating image for user {request.user.username}: {prompt[:50]}...")
+        
+        # Call Replicate API
+        output = replicate.run(
+            "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b",
+            input={
+                "prompt": prompt,
+                "negative_prompt": "blurry, low quality, distorted, watermark, text, ugly",
+                "width": 1024,
+                "height": 1024,
+                "num_outputs": 1,
+                "guidance_scale": 7.5,
+                "num_inference_steps": 25
+            },
+            api_token=api_token
+        )
+        
+        image_url = output[0] if isinstance(output, list) else output
+        
+        # Update user's image generation count if tracking
+        if hasattr(profile, 'image_generations_this_month'):
+            profile.image_generations_this_month += 1
+            profile.save()
+        
+        # Log the image generation
+        conversation = AIConversation.objects.create(
+            user=request.user,
+            prompt=f"Generate image: {prompt}",
+            response=f"Image generated successfully. URL: {image_url}",
+            subject="Image Generation",
+            difficulty="medium",
+            user_tier_at_time=profile.subscription_tier,
+            model_used="stability-ai/sdxl",
+            api_provider="replicate",
+            is_image_generation=True
+        )
+        
+        return Response({
+            "success": True,
+            "image_url": image_url,
+            "prompt": prompt,
+            "message": "Image generated successfully",
+            "image_html": f'<img src="{image_url}" alt="{prompt[:50]}" style="max-width:100%; border-radius:8px;" />',
+            "markdown": f"![{prompt[:50]}...]({image_url})"
+        })
+        
+    except replicate.exceptions.ReplicateError as e:
+        print(f"Replicate API error: {e}")
+        return Response({
+            "success": False,
+            "error": f"Image generation failed: {str(e)[:100]}"
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+    except Exception as e:
+        print(f"Image generation error: {e}")
+        return Response({
+            "success": False,
+            "error": f"Image generation failed: {str(e)[:100]}"
+        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
 @api_view(['POST'])
 @permission_classes([AllowAny])
@@ -1320,7 +1387,8 @@ from django.conf import settings
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def ai_study_helper(request):
-    """Main AI chat endpoint - PROXY to user's API key with fallback to system keys"""
+    """Main AI chat endpoint - PROXY to user's API key with fallback to system keys
+       Now with image generation detection and support"""
     print("=== AI CHAT REQUEST STARTED ===")
     
     start_time = time.time()
@@ -1340,6 +1408,315 @@ def ai_study_helper(request):
             {"error": "Prompt is required."},
             status=status.HTTP_400_BAD_REQUEST
         )
+    
+    # ===== IMAGE REQUEST DETECTION =====
+    def detect_image_request(prompt_text):
+        """Check if user wants an image generated"""
+        image_keywords = [
+            'generate image', 'create image', 'make a picture', 'draw a picture',
+            'show me an image', 'visualize', 'picture of', 'photo of', 'image of',
+            'generate a picture', 'create a picture', 'make an image',
+            'draw', 'paint', 'sketch', 'illustration', 'diagram', 'graphic',
+            'can you show me', 'show me', 'picture', 'image', 'art', 'painting',
+            'logo', 'poster', 'banner', 'infographic', 'chart', 'map'
+        ]
+        
+        prompt_lower = prompt_text.lower().strip()
+        
+        for keyword in image_keywords:
+            if keyword in prompt_lower:
+                return True
+        
+        # Check for patterns like "generate an image of X"
+        if ('generate' in prompt_lower or 'create' in prompt_lower or 'make' in prompt_lower) and \
+           ('image' in prompt_lower or 'picture' in prompt_lower or 'draw' in prompt_lower):
+            return True
+        
+        return False
+    
+    def extract_image_prompt(original_prompt):
+        """Extract the image description from the user's prompt"""
+        prompt_lower = original_prompt.lower()
+        
+        # Remove common image request phrases
+        remove_phrases = [
+            'generate image of', 'create image of', 'make a picture of',
+            'draw a picture of', 'show me an image of', 'visualize',
+            'generate a picture of', 'create a picture of', 'make an image of',
+            'draw', 'paint', 'sketch', 'illustration of', 'diagram of',
+            'generate', 'create', 'make', 'show me', 'picture of', 'image of'
+        ]
+        
+        cleaned_prompt = original_prompt
+        for phrase in remove_phrases:
+            if phrase in prompt_lower:
+                # Replace the phrase with empty string
+                cleaned_prompt = cleaned_prompt.replace(phrase, '').replace(phrase.capitalize(), '')
+        
+        # Clean up extra spaces and punctuation
+        cleaned_prompt = cleaned_prompt.strip()
+        cleaned_prompt = cleaned_prompt.strip(' ,.!?;:-')
+        
+        # If empty after cleaning, use original
+        if not cleaned_prompt or len(cleaned_prompt) < 3:
+            return original_prompt
+        
+        # Add quality improvements
+        enhanced_prompt = f"{cleaned_prompt}, high quality, detailed, professional"
+        
+        # Add context based on keywords
+        if 'diagram' in prompt_lower or 'chart' in prompt_lower:
+            enhanced_prompt += ", educational, labeled, clear"
+        elif 'logo' in prompt_lower:
+            enhanced_prompt += ", minimalist, modern, professional logo design"
+        elif 'poster' in prompt_lower or 'banner' in prompt_lower:
+            enhanced_prompt += ", eye-catching, professional design"
+        elif 'art' in prompt_lower or 'painting' in prompt_lower:
+            enhanced_prompt += ", artistic, creative"
+        
+        return enhanced_prompt
+    
+    # Check if this is an image request
+    if detect_image_request(prompt):
+        print(f"🎨 Detected image generation request: {prompt[:80]}...")
+        
+        # Extract image prompt
+        image_prompt = extract_image_prompt(prompt)
+        print(f"🎨 Extracted image prompt: {image_prompt}")
+        
+        # Get user profile
+        try:
+            profile = request.user.userprofile
+            print(f"Profile found: {profile.subscription_tier}")
+        except UserProfile.DoesNotExist:
+            print("Creating new profile...")
+            profile = UserProfile.objects.create(user=request.user, level="beginner")
+        
+        # Check rate limits
+        print(f"DEBUG: Skipping rate limit check for {request.user.username}")
+        
+        # Get Replicate API token from settings
+        api_token = getattr(settings, 'REPLICATE_API_TOKEN', None)
+        
+        if not api_token:
+            print("❌ Replicate API token not configured in settings")
+            # Fall back to text response explaining the issue
+            answer = "I can generate images, but the image generation service is currently unavailable. Please try asking me a text-based question instead."
+            
+            conversation = AIConversation.objects.create(
+                user=request.user,
+                prompt=prompt,
+                response=answer,
+                subject="Image Generation (Failed)",
+                difficulty=difficulty,
+                user_tier_at_time=profile.subscription_tier,
+                model_used="text-fallback",
+                api_provider="fallback",
+                is_image_generation=True,
+                image_generation_failed=True
+            )
+            
+            profile.record_request(tokens=50)
+            
+            return Response({
+                "success": True,
+                "response": answer,
+                "answer": answer,
+                "image_generation_failed": True,
+                "error": "Image generation service unavailable",
+                "usage": {
+                    "requests_today": profile.requests_today,
+                    "daily_limit": profile.get_tier_limits()['daily_requests'],
+                    "tokens_this_month": profile.tokens_this_month,
+                    "tier": profile.subscription_tier,
+                    "has_api_key": profile.has_api_key(),
+                }
+            })
+        
+        try:
+            print(f"🖼️ Calling Replicate API with token: {api_token[:10]}...")
+            
+            # Call Replicate API
+            output = replicate.run(
+                "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b",
+                input={
+                    "prompt": image_prompt,
+                    "negative_prompt": "blurry, low quality, distorted, watermark, text, ugly, bad anatomy, deformed",
+                    "width": 1024,
+                    "height": 1024,
+                    "num_outputs": 1,
+                    "guidance_scale": 7.5,
+                    "num_inference_steps": 25
+                },
+                api_token=api_token
+            )
+            
+            image_url = output[0] if isinstance(output, list) else output
+            response_time = int((time.time() - start_time) * 1000)
+            
+            print(f"✅ Image generated successfully: {image_url}")
+            
+            # Format the response with markdown for image display
+            answer = f"🎨 **I've generated an image for you!**\n\n"
+            answer += f"**Your request:** {prompt}\n\n"
+            answer += f"**Generated image:**\n![{image_prompt[:50]}...]({image_url})\n\n"
+            answer += f"**Image URL:** {image_url}\n\n"
+            answer += f"*Click the image to view full size • Generated using Stable Diffusion XL*"
+            
+            # Save conversation
+            conversation = AIConversation.objects.create(
+                user=request.user,
+                prompt=prompt,
+                response=answer,
+                subject="Image Generation",
+                difficulty=difficulty,
+                user_tier_at_time=profile.subscription_tier,
+                model_used="stability-ai/sdxl",
+                input_tokens=100,  # Estimated
+                output_tokens=50,  # Estimated
+                total_tokens=150,  # Estimated
+                estimated_user_cost=Decimal('0.00'),
+                your_service_fee=Decimal('0.0005'),  # Higher fee for images
+                api_provider="replicate",
+                response_time_ms=response_time,
+                is_image_generation=True,
+                image_url=image_url,
+                image_prompt=image_prompt
+            )
+            
+            # Record request
+            profile.record_request(tokens=150)
+            
+            # Log proxy request
+            api_log = APIProxyLog.objects.create(
+                user=request.user,
+                endpoint="image_generation",
+                model="stability-ai/sdxl",
+                input_tokens=100,
+                output_tokens=50,
+                total_tokens=150,
+                estimated_user_cost=Decimal('0.00'),
+                your_service_fee=Decimal('0.0005'),
+                response_time_ms=response_time,
+                success=True,
+                provider="replicate",
+                request_type="image_generation",
+                image_generated=True
+            )
+            
+            return Response({
+                "success": True,
+                "response": answer,
+                "answer": answer,
+                "image_generated": True,
+                "image_url": image_url,
+                "image_prompt": image_prompt,
+                "markdown_image": f"![Generated Image]({image_url})",
+                "html_image": f'<img src="{image_url}" alt="{image_prompt[:50]}..." style="max-width:100%; border-radius:8px; margin:10px 0;" />',
+                "usage": {
+                    "requests_today": profile.requests_today,
+                    "daily_limit": profile.get_tier_limits()['daily_requests'],
+                    "tokens_this_month": profile.tokens_this_month,
+                    "tier": profile.subscription_tier,
+                    "has_api_key": profile.has_api_key(),
+                    "using_fallback": False
+                },
+                "costs": {
+                    "estimated_user_cost": 0.00,
+                    "your_service_fee": 0.0005,
+                    "total_tokens": 150,
+                    "provider": "replicate",
+                    "is_free": False,
+                    "token_info": {
+                        "input_tokens": 100,
+                        "output_tokens": 50,
+                        "total_tokens": 150
+                    }
+                },
+                "performance": {
+                    "response_time_ms": response_time,
+                    "provider": "replicate"
+                },
+                "your_profit": 0.0005
+            })
+            
+        except replicate.exceptions.ReplicateError as e:
+            print(f"❌ Replicate API error: {e}")
+            
+            # Save failed attempt
+            conversation = AIConversation.objects.create(
+                user=request.user,
+                prompt=prompt,
+                response=f"Image generation failed: {str(e)[:100]}",
+                subject="Image Generation (Failed)",
+                difficulty=difficulty,
+                user_tier_at_time=profile.subscription_tier,
+                model_used="stability-ai/sdxl",
+                api_provider="replicate",
+                is_image_generation=True,
+                image_generation_failed=True,
+                error_message=str(e)[:200]
+            )
+            
+            profile.record_request(tokens=50)
+            
+            # Fall back to text response
+            answer = f"Sorry, I couldn't generate that image. The image generation service returned an error: {str(e)[:100]}\n\nWould you like to try asking a text-based question instead?"
+            
+            return Response({
+                "success": False,
+                "response": answer,
+                "answer": answer,
+                "image_generation_failed": True,
+                "error": str(e)[:100],
+                "usage": {
+                    "requests_today": profile.requests_today,
+                    "daily_limit": profile.get_tier_limits()['daily_requests'],
+                    "tokens_this_month": profile.tokens_this_month,
+                    "tier": profile.subscription_tier,
+                    "has_api_key": profile.has_api_key(),
+                }
+            })
+            
+        except Exception as e:
+            print(f"❌ Image generation error: {e}")
+            
+            # Save failed attempt
+            conversation = AIConversation.objects.create(
+                user=request.user,
+                prompt=prompt,
+                response=f"Image generation failed: {str(e)[:100]}",
+                subject="Image Generation (Failed)",
+                difficulty=difficulty,
+                user_tier_at_time=profile.subscription_tier,
+                model_used="stability-ai/sdxl",
+                api_provider="replicate",
+                is_image_generation=True,
+                image_generation_failed=True,
+                error_message=str(e)[:200]
+            )
+            
+            profile.record_request(tokens=50)
+            
+            # Fall back to text response
+            answer = f"Sorry, I encountered an error while trying to generate that image: {str(e)[:100]}\n\nWould you like to ask a text-based question instead?"
+            
+            return Response({
+                "success": False,
+                "response": answer,
+                "answer": answer,
+                "image_generation_failed": True,
+                "error": str(e)[:100],
+                "usage": {
+                    "requests_today": profile.requests_today,
+                    "daily_limit": profile.get_tier_limits()['daily_requests'],
+                    "tokens_this_month": profile.tokens_this_month,
+                    "tier": profile.subscription_tier,
+                    "has_api_key": profile.has_api_key(),
+                }
+            })
+    
+    # ===== REGULAR TEXT-BASED AI CHAT CONTINUES =====
     
     # Get user profile
     try:
