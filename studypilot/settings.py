@@ -290,8 +290,7 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 # Image Generation APIs
 REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN", "")
-REPLICATE_API_KEY = os.getenv("REPLICATE_API_KEY", "")  # Alternative
-
+ 
 # Fallback keys for system use
 GROQ_FALLBACK_KEY = os.getenv("GROQ_FALLBACK_KEY", "")
 OPENAI_FALLBACK_KEY = os.getenv("OPENAI_FALLBACK_KEY", "")
