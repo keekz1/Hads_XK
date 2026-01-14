@@ -288,6 +288,9 @@ REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN", "")
 # Verify token exists
 if not REPLICATE_API_TOKEN:
     print("⚠️ WARNING: REPLICATE_API_TOKEN not found in environment variables!")
+    print("❌ Image generation will NOT work without this token!")
+else:
+    print(f"✅ Replicate token found: {REPLICATE_API_TOKEN[:10]}...")
 # === REDIS CONFIGURATION ===
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 

@@ -1245,6 +1245,8 @@ def ai_study_helper(request):
 def generate_ai_image(request):
     """Dedicated endpoint for AI image generation"""
     print("=== AI IMAGE GENERATION REQUEST ===")
+    print(f"User: {request.user.username}")
+    print(f"Data: {request.data}")
     
     prompt = request.data.get("prompt", "").strip()
     
@@ -1257,20 +1259,40 @@ def generate_ai_image(request):
     print(f"Image prompt: {prompt[:100]}...")
     
     try:
-        # Import the image generation function
-        from .ai import generate_image_with_replicate_api
-        
         # Get Replicate API token from settings
         api_token = getattr(settings, 'REPLICATE_API_TOKEN', None)
         
+        print(f"Replicate token available: {bool(api_token)}")
+        print(f"Token length: {len(api_token) if api_token else 0}")
+        print(f"Token starts with 'r8_': {api_token.startswith('r8_') if api_token else False}")
+        
         if not api_token:
+            print("❌ ERROR: No Replicate API token found in settings!")
+            print("Please set REPLICATE_API_TOKEN environment variable")
             return Response({
                 "success": False,
-                "error": "Image generation service not configured"
+                "error": "Image generation service not configured",
+                "setup_required": True,
+                "setup_url": "https://replicate.com/account",
+                "message": "Admin needs to configure Replicate API token"
             }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
         
-        # Generate the image
+        # Test token validity
+        if not api_token.startswith('r8_'):
+            print(f"❌ ERROR: Invalid Replicate token format. Should start with 'r8_'")
+            return Response({
+                "success": False,
+                "error": "Invalid Replicate API token format",
+                "message": "Token should start with 'r8_'"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+        
+        # Generate the image using the imported function
+        from .ai import generate_image_with_replicate_api
+        
+        print(f"🖼️ Calling generate_image_with_replicate_api...")
         result = generate_image_with_replicate_api(prompt, api_token)
+        
+        print(f"✅ Image generated successfully: {result.get('image_url', '')[:50]}...")
         
         # Save to conversation history
         conversation = AIConversation.objects.create(
@@ -1317,11 +1339,15 @@ def generate_ai_image(request):
         })
         
     except Exception as e:
-        print(f"Image generation error: {str(e)}")
+        print(f"❌ Image generation error: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        
         return Response({
             "success": False,
             "error": f"Image generation failed: {str(e)}",
-            "suggestion": "Try a different prompt or try again later"
+            "suggestion": "Try a different prompt or try again later",
+            "traceback": str(e) if DEBUG else None
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
 @api_view(["POST"])
