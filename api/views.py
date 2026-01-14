@@ -1553,6 +1553,8 @@ def ai_study_helper(request):
                 "Accept": "application/json"
             }
             
+            # Use valid dimensions for stable-diffusion-xl-1024-v1-0
+            # Allowed dimensions: 1024x1024, 1152x896, 1216x832, 1344x768, 1536x640, 640x1536, 768x1344, 832x1216, 896x1152
             payload = {
                 "text_prompts": [
                     {
@@ -1560,19 +1562,21 @@ def ai_study_helper(request):
                         "weight": 1
                     },
                     {
-                        "text": "blurry, low quality, distorted, watermark, ugly, bad anatomy, deformed",
+                        "text": "blurry, low quality, distorted, watermark, ugly, bad anatomy, deformed, text",
                         "weight": -1
                     }
                 ],
                 "cfg_scale": 7,
-                "height": 768,
-                "width": 768,
+                "height": 1024,  # Changed to valid dimension
+                "width": 1024,   # Changed to valid dimension
                 "samples": 1,
                 "steps": 30,
+                "style_preset": "photographic"  # Optional: can be "photographic", "digital-art", etc.
             }
             
             print(f"📤 Sending request to Stability AI...")
             print(f"   Prompt: {image_prompt}")
+            print(f"   Dimensions: {payload['width']}x{payload['height']}")
             
             response = requests.post(url, headers=headers, json=payload, timeout=60)
             response_time = int((time.time() - start_time) * 1000)
@@ -1656,6 +1660,17 @@ def ai_study_helper(request):
                     "error": "Invalid API token",
                     "message": "The Stability AI API token is invalid or expired."
                 }, status=401)
+                
+            elif response.status_code == 400:
+                error_text = response.text[:500]
+                print(f"❌ API error 400: {error_text}")
+                
+                # Try with different valid dimensions
+                print("🔄 Trying with different dimensions: 1024x1024")
+                return try_stability_ai_with_dimensions(
+                    request, profile, image_prompt, prompt, difficulty, start_time,
+                    stability_api_key, width=1024, height=1024
+                )
                 
             else:
                 error_text = response.text[:200]
@@ -1773,6 +1788,207 @@ def ai_study_helper(request):
             "error": "Chat request failed",
             "details": str(e)[:200]
         }, status=500)
+
+
+def try_stability_ai_with_dimensions(request, profile, image_prompt, original_prompt, difficulty, start_time, api_key, width=1024, height=1024):
+    """Try Stability AI with different dimensions"""
+    try:
+        print(f"🔄 Trying Stability AI with dimensions {width}x{height}...")
+        
+        url = "https://api.stability.ai/v1/generation/stable-diffusion-xl-1024-v1-0/text-to-image"
+        
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "Accept": "application/json"
+        }
+        
+        payload = {
+            "text_prompts": [
+                {
+                    "text": image_prompt,
+                    "weight": 1
+                },
+                {
+                    "text": "blurry, low quality, distorted, watermark, ugly, bad anatomy, deformed, text",
+                    "weight": -1
+                }
+            ],
+            "cfg_scale": 7,
+            "height": height,
+            "width": width,
+            "samples": 1,
+            "steps": 30,
+        }
+        
+        response = requests.post(url, headers=headers, json=payload, timeout=60)
+        response_time = int((time.time() - start_time) * 1000)
+        
+        if response.status_code == 200:
+            import base64
+            data = response.json()
+            
+            # Save image from base64
+            image_data = base64.b64decode(data["artifacts"][0]["base64"])
+            
+            filename = f"generated_{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
+            filepath = os.path.join(settings.MEDIA_ROOT, 'generated_images', filename)
+            
+            # Ensure directory exists
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            
+            # Save image
+            with open(filepath, 'wb') as f:
+                f.write(image_data)
+            
+            # Get image URL
+            base_url = request.build_absolute_uri('/')[:-1]
+            image_url = f"{base_url}{settings.MEDIA_URL}generated_images/{filename}"
+            
+            print(f"✅ Image saved with dimensions {width}x{height}: {image_url}")
+            
+            answer = f"""
+🎨 **Image Generated Successfully**
+
+**Prompt:** {original_prompt}
+
+*Dimensions: {width}x{height}*
+
+![Generated Image]({image_url})
+
+**Image URL:** {image_url}
+
+*Tip: Click the image to view full size. Right-click to save.*
+"""
+
+            # Create conversation record
+            conversation_data = {
+                'user': request.user,
+                'prompt': original_prompt,
+                'response': answer,
+                'subject': "Image Generation",
+                'difficulty': difficulty,
+                'user_tier_at_time': profile.subscription_tier,
+                'model_used': "stable-diffusion-xl-1024-v1-0",
+                'api_provider': "stability-ai",
+                'response_time_ms': response_time,
+            }
+            
+            # Add image fields if they exist in the model
+            if hasattr(AIConversation, 'is_image_generation'):
+                conversation_data['is_image_generation'] = True
+            if hasattr(AIConversation, 'image_url'):
+                conversation_data['image_url'] = image_url
+            if hasattr(AIConversation, 'image_prompt'):
+                conversation_data['image_prompt'] = image_prompt
+            
+            conversation = AIConversation.objects.create(**conversation_data)
+            print(f"✅ Conversation logged: {conversation.id}")
+
+            profile.record_request(tokens=150)
+
+            return Response({
+                "success": True,
+                "answer": answer,
+                "image_generated": True,
+                "image_url": image_url,
+                "dimensions": f"{width}x{height}",
+                "response_time_ms": response_time
+            })
+        else:
+            # Try other valid dimensions
+            valid_dimensions = [
+                (1152, 896), (1216, 832), (1344, 768), (1536, 640),
+                (640, 1536), (768, 1344), (832, 1216), (896, 1152)
+            ]
+            
+            for w, h in valid_dimensions:
+                print(f"🔄 Trying dimensions {w}x{h}...")
+                try:
+                    payload['width'] = w
+                    payload['height'] = h
+                    
+                    response = requests.post(url, headers=headers, json=payload, timeout=60)
+                    
+                    if response.status_code == 200:
+                        import base64
+                        data = response.json()
+                        image_data = base64.b64decode(data["artifacts"][0]["base64"])
+                        
+                        filename = f"generated_{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
+                        filepath = os.path.join(settings.MEDIA_ROOT, 'generated_images', filename)
+                        os.makedirs(os.path.dirname(filepath), exist_ok=True)
+                        
+                        with open(filepath, 'wb') as f:
+                            f.write(image_data)
+                        
+                        base_url = request.build_absolute_uri('/')[:-1]
+                        image_url = f"{base_url}{settings.MEDIA_URL}generated_images/{filename}"
+                        
+                        answer = f"""
+🎨 **Image Generated Successfully**
+
+**Prompt:** {original_prompt}
+
+*Dimensions: {w}x{h}*
+
+![Generated Image]({image_url})
+
+**Image URL:** {image_url}
+"""
+
+                        conversation_data = {
+                            'user': request.user,
+                            'prompt': original_prompt,
+                            'response': answer,
+                            'subject': "Image Generation",
+                            'difficulty': difficulty,
+                            'user_tier_at_time': profile.subscription_tier,
+                            'model_used': "stable-diffusion-xl-1024-v1-0",
+                            'api_provider': "stability-ai",
+                            'response_time_ms': response_time,
+                        }
+                        
+                        if hasattr(AIConversation, 'is_image_generation'):
+                            conversation_data['is_image_generation'] = True
+                        if hasattr(AIConversation, 'image_url'):
+                            conversation_data['image_url'] = image_url
+                        
+                        AIConversation.objects.create(**conversation_data)
+                        profile.record_request(tokens=150)
+                        
+                        return Response({
+                            "success": True,
+                            "answer": answer,
+                            "image_generated": True,
+                            "image_url": image_url,
+                            "dimensions": f"{w}x{h}",
+                            "response_time_ms": response_time
+                        })
+                        
+                except Exception as e:
+                    print(f"⚠️ Failed with dimensions {w}x{h}: {e}")
+                    continue
+            
+            # If all dimensions fail
+            return Response({
+                "success": False,
+                "error": "All dimension combinations failed",
+                "message": "Image generation failed with all valid dimensions. Please try a different prompt.",
+                "valid_dimensions": [
+                    "1024x1024", "1152x896", "1216x832", "1344x768", "1536x640",
+                    "640x1536", "768x1344", "832x1216", "896x1152"
+                ]
+            }, status=500)
+            
+    except Exception as e:
+        print(f"❌ Dimension fallback error: {e}")
+        return Response({
+            "success": False,
+            "error": "Image generation failed",
+            "details": str(e)[:200]
+        }, status=500)
+  
 
 
 def try_alternative_image_model(request, profile, image_prompt, original_prompt, difficulty, start_time):
