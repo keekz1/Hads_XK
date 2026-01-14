@@ -1479,184 +1479,134 @@ from django.conf import settings
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def ai_study_helper(request):
-    """Main AI chat endpoint - PROXY to user's API key with fallback to system keys
-       Now with image generation detection and support"""
+    """Main AI chat endpoint with image generation + proxy AI support"""
+
+    import os
+    import time
+    import requests
+    import replicate
+    from decimal import Decimal
+    from django.conf import settings
+
     print("=== AI CHAT REQUEST STARTED ===")
-    
     start_time = time.time()
-    
-    # Extract request data
+
+    # ================= REQUEST DATA =================
+
     prompt = request.data.get("prompt", "").strip()
     subject = request.data.get("subject", "General")
     difficulty = request.data.get("difficulty", "Beginner")
     model = request.data.get("model", None)
-    
-    print(f"Prompt: {prompt[:50]}...")
-    print(f"Subject: {subject}, Difficulty: {difficulty}")
-    
-    # Validate prompt
+
+    print(f"Prompt: {prompt[:80]}")
+    print(f"Subject: {subject} | Difficulty: {difficulty}")
+
     if not prompt:
-        return Response(
-            {"error": "Prompt is required."},
-            status=status.HTTP_400_BAD_REQUEST
-        )
-    
-    # ===== IMAGE REQUEST DETECTION =====
-    def detect_image_request(prompt_text):
-        """Check if user wants an image generated"""
-        image_keywords = [
-            'generate image', 'create image', 'make a picture', 'draw a picture',
-            'show me an image', 'visualize', 'picture of', 'photo of', 'image of',
-            'generate a picture', 'create a picture', 'make an image',
-            'draw', 'paint', 'sketch', 'illustration', 'diagram', 'graphic',
-            'can you show me', 'show me', 'picture', 'image', 'art', 'painting',
-            'logo', 'poster', 'banner', 'infographic', 'chart', 'map'
+        return Response({"error": "Prompt is required"}, status=400)
+
+    # ================= IMAGE DETECTION =================
+
+    def detect_image_request(text):
+        keywords = [
+            "generate image", "create image", "make image", "draw", "sketch",
+            "image of", "picture of", "photo of", "logo", "poster",
+            "banner", "diagram", "illustration", "art"
         ]
-        
-        prompt_lower = prompt_text.lower().strip()
-        
-        for keyword in image_keywords:
-            if keyword in prompt_lower:
-                return True
-        
-        # Check for patterns like "generate an image of X"
-        if ('generate' in prompt_lower or 'create' in prompt_lower or 'make' in prompt_lower) and \
-           ('image' in prompt_lower or 'picture' in prompt_lower or 'draw' in prompt_lower):
-            return True
-        
-        return False
-    
-    def extract_image_prompt(original_prompt):
-        """Extract the image description from the user's prompt"""
-        prompt_lower = original_prompt.lower()
-        
-        # Remove common image request phrases
-        remove_phrases = [
-            'generate image of', 'create image of', 'make a picture of',
-            'draw a picture of', 'show me an image of', 'visualize',
-            'generate a picture of', 'create a picture of', 'make an image of',
-            'draw', 'paint', 'sketch', 'illustration of', 'diagram of',
-            'generate', 'create', 'make', 'show me', 'picture of', 'image of'
+        text = text.lower()
+        return any(k in text for k in keywords)
+
+    def extract_image_prompt(text):
+        cleaned = text.lower()
+        remove_words = [
+            "generate image of", "create image of", "make image of",
+            "draw", "sketch", "generate", "create", "make",
+            "image of", "picture of", "photo of"
         ]
-        
-        cleaned_prompt = original_prompt
-        for phrase in remove_phrases:
-            if phrase in prompt_lower:
-                # Replace the phrase with empty string
-                cleaned_prompt = cleaned_prompt.replace(phrase, '').replace(phrase.capitalize(), '')
-        
-        # Clean up extra spaces and punctuation
-        cleaned_prompt = cleaned_prompt.strip()
-        cleaned_prompt = cleaned_prompt.strip(' ,.!?;:-')
-        
-        # If empty after cleaning, use original
-        if not cleaned_prompt or len(cleaned_prompt) < 3:
-            return original_prompt
-        
-        # Add quality improvements
-        enhanced_prompt = f"{cleaned_prompt}, high quality, detailed, professional"
-        
-        # Add context based on keywords
-        if 'diagram' in prompt_lower or 'chart' in prompt_lower:
-            enhanced_prompt += ", educational, labeled, clear"
-        elif 'logo' in prompt_lower:
-            enhanced_prompt += ", minimalist, modern, professional logo design"
-        elif 'poster' in prompt_lower or 'banner' in prompt_lower:
-            enhanced_prompt += ", eye-catching, professional design"
-        elif 'art' in prompt_lower or 'painting' in prompt_lower:
-            enhanced_prompt += ", artistic, creative"
-        
-        return enhanced_prompt
-    
-    # Check if this is an image request
+
+        for word in remove_words:
+            cleaned = cleaned.replace(word, "")
+
+        cleaned = cleaned.strip(" ,.!?")
+
+        return f"{cleaned}, high quality, detailed, professional"
+
+    # ================= USER PROFILE =================
+
+    try:
+        profile = request.user.userprofile
+        print(f"Profile found: {profile.subscription_tier}")
+    except UserProfile.DoesNotExist:
+        profile = UserProfile.objects.create(user=request.user, level="beginner")
+
+    # ================= IMAGE GENERATION =================
+
     if detect_image_request(prompt):
-        print(f"🎨 Detected image generation request: {prompt[:80]}...")
-        
-        # Extract image prompt
+        print("🎨 Image generation request detected")
+
         image_prompt = extract_image_prompt(prompt)
-        print(f"🎨 Extracted image prompt: {image_prompt}")
-        
-        # Get user profile
-        try:
-            profile = request.user.userprofile
-            print(f"Profile found: {profile.subscription_tier}")
-        except UserProfile.DoesNotExist:
-            print("Creating new profile...")
-            profile = UserProfile.objects.create(user=request.user, level="beginner")
-        
-        # Check rate limits
-        print(f"DEBUG: Skipping rate limit check for {request.user.username}")
-        
-        # Get Replicate API token from settings
-        api_token = getattr(settings, 'REPLICATE_API_TOKEN', None)
-        
+        print(f"🎨 Image prompt: {image_prompt}")
+
+        api_token = getattr(settings, "REPLICATE_API_TOKEN", None)
+
         if not api_token:
-            print("❌ Replicate API token not configured in settings")
-            # Fall back to text response explaining the issue
-            answer = "I can generate images, but the image generation service is currently unavailable. Please try asking me a text-based question instead."
-            
-            conversation = AIConversation.objects.create(
+            print("❌ Replicate API token missing")
+
+            answer = "Image generation is currently unavailable. Please try again later."
+
+            AIConversation.objects.create(
                 user=request.user,
                 prompt=prompt,
                 response=answer,
                 subject="Image Generation (Failed)",
                 difficulty=difficulty,
                 user_tier_at_time=profile.subscription_tier,
-                model_used="text-fallback",
-                api_provider="fallback",
+                api_provider="replicate",
                 is_image_generation=True,
                 image_generation_failed=True
             )
-            
+
             profile.record_request(tokens=50)
-            
+
             return Response({
-                "success": True,
-                "response": answer,
+                "success": False,
                 "answer": answer,
-                "image_generation_failed": True,
-                "error": "Image generation service unavailable",
-                "usage": {
-                    "requests_today": profile.requests_today,
-                    "daily_limit": profile.get_tier_limits()['daily_requests'],
-                    "tokens_this_month": profile.tokens_this_month,
-                    "tier": profile.subscription_tier,
-                    "has_api_key": profile.has_api_key(),
-                }
-            })
-        
+                "image_generation_failed": True
+            }, status=503)
+
         try:
-            print(f"🖼️ Calling Replicate API with token: {api_token[:10]}...")
-            
-            # Call Replicate API
-            output = replicate.run(
+            print("🖼️ Connecting to Replicate...")
+
+            client = replicate.Client(api_token=api_token)
+
+            output = client.run(
                 "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b",
                 input={
                     "prompt": image_prompt,
-                    "negative_prompt": "blurry, low quality, distorted, watermark, text, ugly, bad anatomy, deformed",
+                    "negative_prompt": "blurry, low quality, distorted, watermark, ugly",
                     "width": 1024,
                     "height": 1024,
                     "num_outputs": 1,
                     "guidance_scale": 7.5,
                     "num_inference_steps": 25
-                },
-                api_token=api_token
+                }
             )
-            
+
             image_url = output[0] if isinstance(output, list) else output
             response_time = int((time.time() - start_time) * 1000)
-            
-            print(f"✅ Image generated successfully: {image_url}")
-            
-            # Format the response with markdown for image display
-            answer = f"🎨 **I've generated an image for you!**\n\n"
-            answer += f"**Your request:** {prompt}\n\n"
-            answer += f"**Generated image:**\n![{image_prompt[:50]}...]({image_url})\n\n"
-            answer += f"**Image URL:** {image_url}\n\n"
-            answer += f"*Click the image to view full size • Generated using Stable Diffusion XL*"
-            
-            # Save conversation
-            conversation = AIConversation.objects.create(
+
+            print(f"✅ Image generated: {image_url}")
+
+            answer = f"""
+🎨 **Image Generated Successfully**
+
+**Prompt:** {prompt}
+
+![Generated Image]({image_url})
+
+**Image URL:** {image_url}
+"""
+
+            AIConversation.objects.create(
                 user=request.user,
                 prompt=prompt,
                 response=answer,
@@ -1664,614 +1614,110 @@ def ai_study_helper(request):
                 difficulty=difficulty,
                 user_tier_at_time=profile.subscription_tier,
                 model_used="stability-ai/sdxl",
-                input_tokens=100,  # Estimated
-                output_tokens=50,  # Estimated
-                total_tokens=150,  # Estimated
-                estimated_user_cost=Decimal('0.00'),
-                your_service_fee=Decimal('0.0005'),  # Higher fee for images
                 api_provider="replicate",
-                response_time_ms=response_time,
                 is_image_generation=True,
                 image_url=image_url,
-                image_prompt=image_prompt
+                image_prompt=image_prompt,
+                response_time_ms=response_time
             )
-            
-            # Record request
+
             profile.record_request(tokens=150)
-            
-            # Log proxy request
-            api_log = APIProxyLog.objects.create(
-                user=request.user,
-                endpoint="image_generation",
-                model="stability-ai/sdxl",
-                input_tokens=100,
-                output_tokens=50,
-                total_tokens=150,
-                estimated_user_cost=Decimal('0.00'),
-                your_service_fee=Decimal('0.0005'),
-                response_time_ms=response_time,
-                success=True,
-                provider="replicate",
-                request_type="image_generation",
-                image_generated=True
-            )
-            
+
             return Response({
                 "success": True,
-                "response": answer,
                 "answer": answer,
                 "image_generated": True,
                 "image_url": image_url,
-                "image_prompt": image_prompt,
-                "markdown_image": f"![Generated Image]({image_url})",
-                "html_image": f'<img src="{image_url}" alt="{image_prompt[:50]}..." style="max-width:100%; border-radius:8px; margin:10px 0;" />',
-                "usage": {
-                    "requests_today": profile.requests_today,
-                    "daily_limit": profile.get_tier_limits()['daily_requests'],
-                    "tokens_this_month": profile.tokens_this_month,
-                    "tier": profile.subscription_tier,
-                    "has_api_key": profile.has_api_key(),
-                    "using_fallback": False
-                },
-                "costs": {
-                    "estimated_user_cost": 0.00,
-                    "your_service_fee": 0.0005,
-                    "total_tokens": 150,
-                    "provider": "replicate",
-                    "is_free": False,
-                    "token_info": {
-                        "input_tokens": 100,
-                        "output_tokens": 50,
-                        "total_tokens": 150
-                    }
-                },
-                "performance": {
-                    "response_time_ms": response_time,
-                    "provider": "replicate"
-                },
-                "your_profit": 0.0005
+                "response_time_ms": response_time
             })
-            
-        except replicate.exceptions.ReplicateError as e:
-            print(f"❌ Replicate API error: {e}")
-            
-            # Save failed attempt
-            conversation = AIConversation.objects.create(
-                user=request.user,
-                prompt=prompt,
-                response=f"Image generation failed: {str(e)[:100]}",
-                subject="Image Generation (Failed)",
-                difficulty=difficulty,
-                user_tier_at_time=profile.subscription_tier,
-                model_used="stability-ai/sdxl",
-                api_provider="replicate",
-                is_image_generation=True,
-                image_generation_failed=True,
-                error_message=str(e)[:200]
-            )
-            
-            profile.record_request(tokens=50)
-            
-            # Fall back to text response
-            answer = f"Sorry, I couldn't generate that image. The image generation service returned an error: {str(e)[:100]}\n\nWould you like to try asking a text-based question instead?"
-            
-            return Response({
-                "success": False,
-                "response": answer,
-                "answer": answer,
-                "image_generation_failed": True,
-                "error": str(e)[:100],
-                "usage": {
-                    "requests_today": profile.requests_today,
-                    "daily_limit": profile.get_tier_limits()['daily_requests'],
-                    "tokens_this_month": profile.tokens_this_month,
-                    "tier": profile.subscription_tier,
-                    "has_api_key": profile.has_api_key(),
-                }
-            })
-            
+
         except Exception as e:
-            print(f"❌ Image generation error: {e}")
-            
-            # Save failed attempt
-            conversation = AIConversation.objects.create(
-                user=request.user,
-                prompt=prompt,
-                response=f"Image generation failed: {str(e)[:100]}",
-                subject="Image Generation (Failed)",
-                difficulty=difficulty,
-                user_tier_at_time=profile.subscription_tier,
-                model_used="stability-ai/sdxl",
-                api_provider="replicate",
-                is_image_generation=True,
-                image_generation_failed=True,
-                error_message=str(e)[:200]
-            )
-            
-            profile.record_request(tokens=50)
-            
-            # Fall back to text response
-            answer = f"Sorry, I encountered an error while trying to generate that image: {str(e)[:100]}\n\nWould you like to ask a text-based question instead?"
-            
+            print("❌ Replicate error:", str(e))
+
             return Response({
                 "success": False,
-                "response": answer,
-                "answer": answer,
-                "image_generation_failed": True,
-                "error": str(e)[:100],
-                "usage": {
-                    "requests_today": profile.requests_today,
-                    "daily_limit": profile.get_tier_limits()['daily_requests'],
-                    "tokens_this_month": profile.tokens_this_month,
-                    "tier": profile.subscription_tier,
-                    "has_api_key": profile.has_api_key(),
-                }
-            })
-    
-    # ===== REGULAR TEXT-BASED AI CHAT CONTINUES =====
-    
-    # Get user profile
-    try:
-        profile = request.user.userprofile
-        print(f"Profile found: {profile.subscription_tier}")
-        print(f"Preferred provider: {profile.preferred_provider}")
-        print(f"OpenAI key type: {profile.openai_key_type}")
-    except UserProfile.DoesNotExist:
-        print("Creating new profile...")
-        profile = UserProfile.objects.create(user=request.user, level="beginner")
-    
-    # === TEMPORARY: SKIP RATE LIMITING CHECK ===
-    print(f"DEBUG: Skipping rate limit check for {request.user.username}")
-    
-    # === GET API KEY WITH FALLBACK SYSTEM ===
-    api_key = None
-    key_source = "user"  # Track where the key came from
-    using_system_fallback = False
-    
-    # 1. Try to get user's API key first
+                "error": "Image generation failed",
+                "details": str(e)
+            }, status=500)
+
+    # ================= NORMAL AI CHAT =================
+
+    print("💬 Normal AI chat request")
+
     api_key = profile.get_api_key()
-    
-    # 2. If user has no API key, use YOUR fallback API key from env
+    using_system_fallback = False
+
     if not api_key:
-        key_source = "system_fallback"
         using_system_fallback = True
-        
-        # Determine which fallback key to use based on provider
+
         if profile.preferred_provider == "groq":
-            # IMPORTANT: Try multiple fallback sources in order
-            api_key = (
-                os.environ.get('GROQ_API_KEY') or  # First try GROQ_API_KEY
-                os.environ.get('GROQ_FALLBACK_KEY') or  # Then GROQ_FALLBACK_KEY
-                os.environ.get('STUDYPILOT_GROQ_API_KEY')  # Then STUDYPILOT_GROQ_API_KEY
-            )
-            
-            if api_key:
-                print(f"Using SYSTEM fallback Groq API key from environment")
-            else:
-                # If no system key either, ask user to set up
-                provider_info = profile.get_provider_info()
-                return Response({
-                    "success": False,
-                    "error": "API key not configured",
-                    "setup_required": True,
-                    "message": f"Please set up your {provider_info.get('name', 'AI')} API key in your profile",
-                    "setup_url": "/profile/api-setup/",
-                    "using_system_fallback": False
-                }, status=status.HTTP_402_PAYMENT_REQUIRED)
-                
-        elif profile.preferred_provider == "openai":
-            # Try multiple fallback sources for OpenAI
-            api_key = (
-                os.environ.get('OPENAI_API_KEY') or  # First try OPENAI_API_KEY
-                os.environ.get('OPENAI_FALLBACK_KEY') or  # Then OPENAI_FALLBACK_KEY
-                os.environ.get('STUDYPILOT_OPENAI_API_KEY')  # Then STUDYPILOT_OPENAI_API_KEY
-            )
-            
-            if api_key:
-                print(f"Using SYSTEM fallback OpenAI API key from environment")
-            else:
-                # If no system key either, ask user to set up
-                provider_info = profile.get_provider_info()
-                return Response({
-                    "success": False,
-                    "error": "API key not configured",
-                    "setup_required": True,
-                    "message": f"Please set up your {provider_info.get('name', 'AI')} API key in your profile",
-                    "setup_url": "/profile/api-setup/",
-                    "using_system_fallback": False
-                }, status=status.HTTP_402_PAYMENT_REQUIRED)
-    else:
-        print(f"Using USER'S API key for {profile.preferred_provider}")
-    
-    print(f"API Key source: {key_source}")
-    print(f"Using system fallback: {using_system_fallback}")
-    print(f"API Key exists: {bool(api_key)}")
-    print(f"API Key first 10 chars: {api_key[:10] if api_key else 'None'}...")
-    
-    # Use preferred model if not specified
+            api_key = os.getenv("GROQ_API_KEY") or os.getenv("GROQ_FALLBACK_KEY")
+        else:
+            api_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_FALLBACK_KEY")
+
+    if not api_key:
+        return Response({
+            "success": False,
+            "error": "API key not configured",
+            "message": "Please add your API key in profile settings"
+        }, status=402)
+
     if not model:
         model = profile.preferred_model
-    
-    print(f"Model: {model}")
-    
-    # Validate model is compatible with provider
-    if not profile.validate_model_selection(model):
+
+    messages = [{"role": "user", "content": prompt}]
+
+    if profile.preferred_provider == "openai":
+        url = "https://api.openai.com/v1/chat/completions"
+    else:
+        url = "https://api.groq.com/openai/v1/chat/completions"
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.7,
+        "max_tokens": 2000
+    }
+
+    response = requests.post(url, headers=headers, json=payload, timeout=30)
+    response_data = response.json()
+    response_time = int((time.time() - start_time) * 1000)
+
+    if response.status_code != 200:
         return Response({
             "success": False,
-            "error": "Invalid model selection",
-            "details": f"Model '{model}' is not compatible with {profile.preferred_provider}",
-            "available_models": profile.get_available_models()
-        }, status=status.HTTP_400_BAD_REQUEST)
-    
-    # Build conversation history
-    previous_convos = list(AIConversation.objects.filter(user=request.user).order_by("-created_at")[:5])
-    previous_convos.reverse()
-    
-    messages = []
-    for convo in previous_convos:
-        if convo.prompt:
-            messages.append({"role": "user", "content": convo.prompt[:500]})
-        if convo.response:
-            messages.append({"role": "assistant", "content": convo.response[:500]})
-    
-    # Add current message
-    messages.append({"role": "user", "content": prompt[:4000]})
-    
-    print(f"Number of previous conversations: {len(previous_convos)}")
-    print(f"Total messages to send: {len(messages)}")
-    
-    try:
-        # Determine provider from model
-        provider = profile.preferred_provider
-        print(f"Provider: {provider}")
-        
-        # Prepare request based on provider
-        if provider == "openai":
-            print("Using OpenAI...")
-            url = "https://api.openai.com/v1/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "model": model,
-                "messages": messages,
-                "max_tokens": profile.get_tier_limits().get('max_tokens_per_request', 2000),
-                "temperature": 0.7
-            }
-            
-        elif provider == "groq":
-            print("Using Groq...")
-            url = "https://api.groq.com/openai/v1/chat/completions"
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
-            }
-            payload = {
-                "model": model,
-                "messages": messages,
-                "max_tokens": profile.get_tier_limits().get('max_tokens_per_request', 2000),
-                "temperature": 0.7
-            }
-            print(f"Groq URL: {url}")
-            print(f"Groq headers: Authorization: Bearer {api_key[:10]}...")
-            print(f"Groq payload keys: {list(payload.keys())}")
-            
-        else:
-            return Response({
-                "success": False,
-                "error": f"Provider {provider} not yet supported"
-            }, status=400)
-        
-        print(f"Making request to {provider} API...")
-        
-        # Make request to provider API
-        response = requests.post(url, headers=headers, json=payload, timeout=30)
-        print(f"Response status: {response.status_code}")
-        
-        response_data = response.json()
-        response_time = int((time.time() - start_time) * 1000)
-        
-        print(f"Response data keys: {list(response_data.keys())}")
-        
-        if response.status_code != 200:
-            # Still count as request against YOUR limits
-            profile.record_request(tokens=0)
-            
-            print(f"API Error: {response_data}")
-            
-            # Handle specific OpenAI errors
-            if provider == "openai":
-                error_msg = response_data.get('error', {}).get('message', 'Unknown error')
-                error_type = response_data.get('error', {}).get('type', '')
-                error_code = response_data.get('error', {}).get('code', '')
-                
-                print(f"OpenAI Error: {error_msg}")
-                print(f"OpenAI Error Type: {error_type}")
-                print(f"OpenAI Error Code: {error_code}")
-                
-                # Check if it's an insufficient quota error (free tier expired or no credits)
-                if (response.status_code == 429 or 
-                    'insufficient_quota' in str(response_data).lower() or 
-                    'exceeded your current quota' in error_msg or 
-                    'account has no remaining credits' in error_msg or
-                    'quota' in error_msg.lower() or
-                    error_code == 'insufficient_quota'):
-                    
-                    print("Detected OpenAI quota/credit error")
-                    
-                    # Determine specific issue
-                    if profile.openai_key_type == 'free_tier':
-                        # Free tier account
-                        error_title = "OpenAI Free Credits Expired"
-                        error_details = "Your OpenAI free credits have expired. Add payment method or switch to FREE Groq."
-                    else:
-                        # Paid account with no credits
-                        error_title = "OpenAI Account Needs Credits"
-                        error_details = "Your OpenAI account has no remaining credits. Add payment method to your OpenAI account."
-                    
-                    return Response({
-                        "success": False,
-                        "error": error_title,
-                        "details": error_details,
-                        "provider_error": True,
-                        "provider": provider,
-                        "error_type": "insufficient_quota",
-                        "error_code": response.status_code,
-                        "original_error": error_msg,
-                        "auto_suggest_groq": True,
-                        "groq_signup_url": "https://console.groq.com/signup",
-                        "solutions": [
-                            "1. Add payment method to OpenAI account: https://platform.openai.com/account/billing",
-                            "2. Switch to FREE Groq (5M tokens/month!) - RECOMMENDED"
-                        ],
-                        "switch_provider_url": "/profile/#api-settings",
-                        "credit_balance": float(profile.openai_key_credit_balance),
-                        "account_type": profile.openai_key_type,
-                        "using_system_fallback": using_system_fallback,
-                        "key_source": key_source
-                    }, status=402)
-                
-                elif response.status_code == 401:
-                    # Check if using system fallback - if so, your system key might be invalid
-                    if using_system_fallback:
-                        error_title = "System API Key Invalid"
-                        error_details = "The system fallback API key is invalid. Please contact support or add your own API key."
-                    else:
-                        error_title = "Invalid OpenAI API Key"
-                        error_details = "Your OpenAI API key is invalid or has been revoked."
-                    
-                    return Response({
-                        "success": False,
-                        "error": error_title,
-                        "details": error_details,
-                        "provider_error": True,
-                        "provider": provider,
-                        "action_required": "Get a new API key from https://platform.openai.com/api-keys",
-                        "original_error": error_msg,
-                        "using_system_fallback": using_system_fallback,
-                        "key_source": key_source
-                    }, status=401)
-                
-                elif response.status_code == 429 and 'rate_limit' in error_msg.lower():
-                    # Rate limit error (different from quota)
-                    return Response({
-                        "success": False,
-                        "error": "OpenAI Rate Limit",
-                        "details": "You've hit OpenAI's rate limits.",
-                        "provider_error": True,
-                        "provider": provider,
-                        "suggestion": "Try again in a few moments or switch to Groq",
-                        "original_error": error_msg,
-                        "using_system_fallback": using_system_fallback,
-                        "key_source": key_source
-                    }, status=429)
-                
-                elif response.status_code == 404 and 'model' in error_msg.lower():
-                    # Model not found error
-                    return Response({
-                        "success": False,
-                        "error": "OpenAI Model Not Available",
-                        "details": f"The model '{model}' is not available with your account.",
-                        "provider_error": True,
-                        "provider": provider,
-                        "suggestion": "Switch to a different model or check your account access",
-                        "original_error": error_msg,
-                        "using_system_fallback": using_system_fallback,
-                        "key_source": key_source
-                    }, status=404)
-                
-                else:
-                    # Other OpenAI errors
-                    return Response({
-                        "success": False,
-                        "error": f"OpenAI API Error",
-                        "details": f"{error_msg} (Status: {response.status_code})",
-                        "provider_error": True,
-                        "provider": provider,
-                        "original_error": error_msg,
-                        "error_code": response.status_code,
-                        "using_system_fallback": using_system_fallback,
-                        "key_source": key_source
-                    }, status=response.status_code)
-            
-            # Handle Groq errors
-            elif provider == "groq" and response.status_code == 401:
-                # Check if using system fallback
-                if using_system_fallback:
-                    error_title = "System Groq Key Invalid"
-                    error_details = "The system fallback Groq API key is invalid. Please contact support."
-                else:
-                    error_title = "Invalid Groq API Key"
-                    error_details = "Your Groq API key is invalid or has been revoked."
-                
-                return Response({
-                    "success": False,
-                    "error": error_title,
-                    "details": error_details,
-                    "provider_error": True,
-                    "provider": provider,
-                    "action_required": "Get a FREE API key from https://console.groq.com/keys",
-                    "original_error": response_data.get('error', {}).get('message', 'Invalid API key'),
-                    "using_system_fallback": using_system_fallback,
-                    "key_source": key_source
-                }, status=401)
-            
-            elif provider == "groq" and response.status_code == 429:
-                return Response({
-                    "success": False,
-                    "error": "Groq Rate Limit",
-                    "details": "Groq free tier rate limit reached. Try again in a moment.",
-                    "provider_error": True,
-                    "provider": provider,
-                    "suggestion": "Groq free tier has generous limits, but if you hit them, wait a minute and try again.",
-                    "original_error": response_data.get('error', {}).get('message', 'Rate limit exceeded'),
-                    "using_system_fallback": using_system_fallback,
-                    "key_source": key_source
-                }, status=429)
-            
-            # Handle all other provider errors
-            return Response({
-                "success": False,
-                "error": f"AI provider error",
-                "details": f"{response_data.get('error', {}).get('message', 'Unknown error')}",
-                "provider_error": True,
-                "provider": provider,
-                "original_error": response_data.get('error', {}).get('message', 'Unknown error'),
-                "error_code": response.status_code,
-                "using_system_fallback": using_system_fallback,
-                "key_source": key_source
-            }, status=response.status_code)
-        
-        # Extract response text
-        if provider in ["openai", "groq"]:
-            print("Extracting OpenAI/Groq response...")
-            answer = response_data['choices'][0]['message']['content']
-            tokens = parse_tokens_from_response(response_data)
-        
-        print(f"Answer length: {len(answer)} chars")
-        print(f"Tokens: input={tokens['input_tokens']}, output={tokens['output_tokens']}")
-        
-        # Calculate costs (USER pays this - FREE for Groq!)
-        key_type = profile.openai_key_type if provider == 'openai' else 'unknown'
-        user_cost = calculate_user_cost(tokens['input_tokens'], tokens['output_tokens'], model, key_type)
-        
-        # Determine if this request is free for user
-        # If using system fallback, user pays nothing
-        is_free_for_user = (
-            using_system_fallback or  # User pays nothing when using YOUR key
-            provider == 'groq' or 
-            (provider == 'openai' and key_type == 'free_tier' and 'gpt-3.5' in model.lower())
-        )
-        
-        # YOUR service fee (tiny profit)
-        your_service_fee = Decimal('0.0001')
-        
-        # Save conversation with key source info
-        conversation = AIConversation.objects.create(
-            user=request.user,
-            prompt=prompt,
-            response=answer,
-            subject=subject,
-            difficulty=difficulty,
-            user_tier_at_time=profile.subscription_tier,
-            model_used=model,
-            input_tokens=tokens['input_tokens'],
-            output_tokens=tokens['output_tokens'],
-            total_tokens=tokens['total_tokens'],
-            estimated_user_cost=Decimal('0.00'),  # Free for user when using system fallback
-            your_service_fee=your_service_fee,
-            api_provider=provider,
-            response_time_ms=response_time,
-            key_source=key_source  # Track if it was user's key or fallback
-        )
-        
-        # Record request (YOUR service)
-        profile.record_request(tokens=tokens['total_tokens'])
-        
-        # Log proxy request (YOUR analytics)
-        api_log = APIProxyLog.objects.create(
-            user=request.user,
-            endpoint="chat/completions",
-            model=model,
-            input_tokens=tokens['input_tokens'],
-            output_tokens=tokens['output_tokens'],
-            total_tokens=tokens['total_tokens'],
-            estimated_user_cost=Decimal('0.00'),  # Free when using fallback
-            your_service_fee=your_service_fee,
-            response_time_ms=response_time,
-            success=True,
-            provider=provider,
-            request_type="chat",
-          
-        )
-        
-        return Response({
-            "success": True,
-            "response": answer,
-            "answer": answer,
-            "usage": {
-                "requests_today": profile.requests_today,
-                "daily_limit": profile.get_tier_limits()['daily_requests'],
-                "tokens_this_month": profile.tokens_this_month,
-                "tier": profile.subscription_tier,
-                "has_api_key": profile.has_api_key(),
-                
-                "using_fallback": using_system_fallback
-            },
-            "costs": {
-                "estimated_user_cost": 0.00,  # USER pays nothing when using system fallback
-                "your_service_fee": float(your_service_fee),  # YOUR profit
-                "total_tokens": tokens['total_tokens'],
-                "provider": provider,
-                "is_free": True,  # Always free for user when using system fallback
-                "key_type": key_type if provider == 'openai' else None,
-                "key_source": key_source,
-                "using_system_key": using_system_fallback,
-                "token_info": {
-                    "input_tokens": tokens['input_tokens'],
-                    "output_tokens": tokens['output_tokens'],
-                    "total_tokens": tokens['total_tokens']
-                }
-            },
-            "performance": {
-                "response_time_ms": response_time,
-                "provider": provider
-            },
-            "your_profit": float(your_service_fee)  # YOUR profit from this request
-        })
-        
-    except requests.exceptions.Timeout:
-        print("Request timeout!")
-        profile.record_request(tokens=0)
-        return Response({
-            "success": False,
-            "error": "Request timeout - AI provider taking too long",
-            "suggestion": "Try a simpler prompt or different model",
-            "using_system_fallback": using_system_fallback,
-            "key_source": key_source
-        }, status=status.HTTP_504_GATEWAY_TIMEOUT)
-        
-    except Exception as e:
-        import traceback
-        print(f"=== EXCEPTION CAUGHT ===")
-        print(f"Error type: {type(e).__name__}")
-        print(f"Error message: {str(e)}")
-        print(f"Traceback:")
-        traceback.print_exc()
-        print(f"=== END TRACEBACK ===")
-        
-        profile.record_request(tokens=0)
-        return Response({
-            "success": False,
-            "error": f"Proxy error: {str(e)[:100]}",
-            "error_type": type(e).__name__,
-            "traceback": traceback.format_exc(),
-            "using_system_fallback": using_system_fallback,
-            "key_source": key_source
-        }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
-        
-        
+            "error": response_data
+        }, status=response.status_code)
+
+    answer = response_data["choices"][0]["message"]["content"]
+
+    AIConversation.objects.create(
+        user=request.user,
+        prompt=prompt,
+        response=answer,
+        subject=subject,
+        difficulty=difficulty,
+        user_tier_at_time=profile.subscription_tier,
+        model_used=model,
+        api_provider=profile.preferred_provider,
+        response_time_ms=response_time
+    )
+
+    profile.record_request(tokens=200)
+
+    return Response({
+        "success": True,
+        "answer": answer,
+        "provider": profile.preferred_provider,
+        "using_fallback": using_system_fallback,
+        "response_time_ms": response_time
+    })
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def analyze_pdf(request):
