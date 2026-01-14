@@ -7,7 +7,8 @@ from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django.core.files.storage import default_storage
 from django.conf import settings
-
+from django.views.decorators.csrf import csrf_exempt   
+from django.http import JsonResponse   
 # Django REST Framework imports
 from rest_framework.decorators import api_view, authentication_classes, permission_classes, parser_classes
 from rest_framework.authentication import SessionAuthentication, TokenAuthentication
