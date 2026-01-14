@@ -283,14 +283,50 @@ SIMPLE_JWT = {
 
 # === API KEYS & EXTERNAL SERVICES ===
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
-REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN", "")
 
-# Verify token exists
-if not REPLICATE_API_TOKEN:
-    print("⚠️ WARNING: REPLICATE_API_TOKEN not found in environment variables!")
-    print("❌ Image generation will NOT work without this token!")
+# ===== REPLICATE API CONFIGURATION =====
+# Try multiple ways to get the Replicate token
+REPLICATE_API_TOKEN = (
+    os.getenv("REPLICATE_API_TOKEN") or 
+    os.getenv("REPLICATE_TOKEN") or
+    ""  # Will be replaced with your token
+)
+
+# Debug output for API keys
+print("\n" + "="*60)
+print("🔑 API KEY CONFIGURATION STATUS")
+print("="*60)
+print(f"GROQ_API_KEY: {'✅ FOUND' if GROQ_API_KEY else '❌ MISSING'}")
+if GROQ_API_KEY:
+    print(f"  Length: {len(GROQ_API_KEY)} chars")
+    print(f"  Starts with 'gsk_': {GROQ_API_KEY.startswith('gsk_')}")
+
+print(f"REPLICATE_API_TOKEN: {'✅ FOUND' if REPLICATE_API_TOKEN else '❌ MISSING'}")
+if REPLICATE_API_TOKEN:
+    print(f"  Length: {len(REPLICATE_API_TOKEN)} chars")
+    print(f"  Starts with 'r8_': {REPLICATE_API_TOKEN.startswith('r8_')}")
+    print(f"  First 10 chars: {REPLICATE_API_TOKEN[:10]}...")
 else:
-    print(f"✅ Replicate token found: {REPLICATE_API_TOKEN[:10]}...")
+    print(f"  ❌ Image generation will NOT work without this token!")
+    print(f"  💡 Get a FREE token from: https://replicate.com/account/api-tokens")
+    print(f"  💡 Add to Railway: Settings → Environment Variables → REPLICATE_API_TOKEN")
+    
+    # List all environment variables for debugging
+    print(f"\n🔍 Checking all environment variables...")
+    env_vars = os.environ.copy()
+    relevant_vars = {k: v for k, v in env_vars.items() 
+                     if 'REPLICATE' in k.upper() or 'TOKEN' in k.upper() or 'KEY' in k.upper()}
+    
+    if relevant_vars:
+        print(f"Found {len(relevant_vars)} relevant environment variables:")
+        for key, value in relevant_vars.items():
+            masked_value = value[:10] + "..." if len(value) > 10 else "***"
+            print(f"  {key}: {masked_value}")
+    else:
+        print(f"No relevant environment variables found")
+
+print("="*60 + "\n")
+
 # === REDIS CONFIGURATION ===
 REDIS_URL = os.getenv('REDIS_URL', 'redis://localhost:6379/0')
 
@@ -398,6 +434,3 @@ else:
             'rest_framework.permissions.AllowAny',
         ],
     }
-    
-    
-    
