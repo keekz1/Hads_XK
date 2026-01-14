@@ -96,8 +96,15 @@ def analyze_document_with_ai(document_text, question="", api_key=None, provider=
     # If no API key provided but user_profile is given, try to get fallback
     using_system_fallback = False
     if not api_key and user_profile:
-        # Try user's key first
-        api_key = user_profile.get_api_key()
+        # FIX: Direct attribute access instead of method call
+        if user_profile.preferred_provider == 'groq':
+            api_key = user_profile.groq_api_key
+        elif user_profile.preferred_provider == 'openai':
+            api_key = user_profile.openai_api_key
+        elif user_profile.preferred_provider == 'anthropic':
+            api_key = user_profile.anthropic_api_key
+        elif user_profile.preferred_provider == 'gemini':
+            api_key = user_profile.gemini_api_key
         
         # If user has no key, try system fallback
         if not api_key:
@@ -707,7 +714,18 @@ def proxy_ai_request(user, prompt, subject=None, difficulty=None, model=None):
     """
     try:
         profile = user.userprofile
-        user_api_key = profile.get_api_key()
+        
+        # FIX: Direct attribute access instead of method call
+        user_api_key = None
+        if profile.preferred_provider == 'groq':
+            user_api_key = profile.groq_api_key
+        elif profile.preferred_provider == 'openai':
+            user_api_key = profile.openai_api_key
+        elif profile.preferred_provider == 'anthropic':
+            user_api_key = profile.anthropic_api_key
+        elif profile.preferred_provider == 'gemini':
+            user_api_key = profile.gemini_api_key
+        
         provider = profile.preferred_provider
         
         # Track where the API key comes from
@@ -794,19 +812,16 @@ def proxy_ai_request(user, prompt, subject=None, difficulty=None, model=None):
         error_msg = str(e)
         print(f"AI request error for {user.username}: {error_msg}")
         
-        # Check if profile exists in exception context
-        profile = None
-        try:
-            profile = user.userprofile
-        except:
-            pass
+        # FIXED ERROR HANDLING: Don't use .get() on UserProfile object
+        profile = getattr(user, 'userprofile', None)
+        provider = getattr(profile, 'preferred_provider', 'groq') if profile else 'groq'
         
         return {
             "success": False,
             "error": error_msg,
             "requires_setup": "invalid" in error_msg.lower() or "key" in error_msg.lower() or "authentication" in error_msg.lower(),
-            "provider": getattr(profile, 'preferred_provider', 'groq') if profile else 'groq',
-            "is_groq": getattr(profile, 'preferred_provider', 'groq') == 'groq' if profile else True,
+            "provider": provider,
+            "is_groq": provider == 'groq',
             "suggestion": "Try setting up your own Groq API key (FREE!) at https://console.groq.com/signup"
         }
 
@@ -1121,15 +1136,24 @@ def ask_ai_with_image_support(user_id, conversation, subject=None, difficulty=No
     )
 
 
-# ===== UPDATED PROXY_AI_REQUEST WITH IMAGE SUPPORT =====
-
 def proxy_ai_request_with_images(user, prompt, subject=None, difficulty=None, model=None):
     """
     Enhanced proxy function that supports image generation
     """
     try:
         profile = user.userprofile
-        user_api_key = profile.get_api_key()
+        
+        # FIX: Direct attribute access instead of method call
+        user_api_key = None
+        if profile.preferred_provider == 'groq':
+            user_api_key = profile.groq_api_key
+        elif profile.preferred_provider == 'openai':
+            user_api_key = profile.openai_api_key
+        elif profile.preferred_provider == 'anthropic':
+            user_api_key = profile.anthropic_api_key
+        elif profile.preferred_provider == 'gemini':
+            user_api_key = profile.gemini_api_key
+        
         provider = profile.preferred_provider
         
         # Check if this is an image request
@@ -1214,13 +1238,15 @@ def proxy_ai_request_with_images(user, prompt, subject=None, difficulty=None, mo
         error_msg = str(e)
         print(f"AI request error for {user.username}: {error_msg}")
         
+        # FIXED ERROR HANDLING: Don't use .get() on UserProfile object
+        profile = getattr(user, 'userprofile', None)
+        provider = getattr(profile, 'preferred_provider', 'groq') if profile else 'groq'
+        
         return {
             "success": False,
             "error": error_msg,
             "requires_setup": "invalid" in error_msg.lower() or "key" in error_msg.lower(),
-            "provider": getattr(user, 'userprofile', {}).get('preferred_provider', 'groq'),
-            "is_groq": getattr(user, 'userprofile', {}).get('preferred_provider', 'groq') == 'groq'
+            "provider": provider,
+            "is_groq": provider == 'groq'
         }
-
-
  

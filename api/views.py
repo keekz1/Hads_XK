@@ -1191,10 +1191,10 @@ def ai_study_helper(request):
                 "image_prompt": result.get("image_prompt"),
                 "usage": {
                     "requests_today": profile.requests_today,
-                    "daily_limit": profile.get_tier_limits()['daily_requests'],
+                    "daily_limit": profile.get_tier_limits()['daily_requests'],  # This .get() is OK - it's on the dict
                     "tokens_this_month": profile.tokens_this_month,
                     "tier": profile.subscription_tier,
-                    "has_api_key": profile.has_api_key(),
+                    "has_api_key": profile.has_api_key(),  # This method exists
                     "using_fallback": result.get("using_system_fallback", False)
                 },
                 "costs": {
