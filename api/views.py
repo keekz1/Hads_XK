@@ -1476,23 +1476,16 @@ import os
 from django.conf import settings
 
 
+# Update the image generation section in ai_study_helper function
+
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])
 def ai_study_helper(request):
     """Main AI chat endpoint with image generation + proxy AI support"""
-
-    import os
-    import time
-    import requests
-    import replicate
-    from decimal import Decimal
-    from django.conf import settings
-
     print("=== AI CHAT REQUEST STARTED ===")
     start_time = time.time()
 
     # ================= REQUEST DATA =================
-
     prompt = request.data.get("prompt", "").strip()
     subject = request.data.get("subject", "General")
     difficulty = request.data.get("difficulty", "Beginner")
@@ -1505,7 +1498,6 @@ def ai_study_helper(request):
         return Response({"error": "Prompt is required"}, status=400)
 
     # ================= IMAGE DETECTION =================
-
     def detect_image_request(text):
         keywords = [
             "generate image", "create image", "make image", "draw", "sketch",
@@ -1531,25 +1523,23 @@ def ai_study_helper(request):
         return f"{cleaned}, high quality, detailed, professional"
 
     # ================= USER PROFILE =================
-
     try:
         profile = request.user.userprofile
         print(f"Profile found: {profile.subscription_tier}")
     except UserProfile.DoesNotExist:
         profile = UserProfile.objects.create(user=request.user, level="beginner")
 
-    # ================= IMAGE GENERATION =================
-
+    # ================= IMAGE GENERATION (UPDATED FOR HUGGINGFACE) =================
     if detect_image_request(prompt):
         print("🎨 Image generation request detected")
 
         image_prompt = extract_image_prompt(prompt)
         print(f"🎨 Image prompt: {image_prompt}")
 
-        api_token = getattr(settings, "REPLICATE_API_TOKEN", None)
+        hf_token = getattr(settings, "HUGGINGFACE_TOKEN", None)
 
-        if not api_token:
-            print("❌ Replicate API token missing")
+        if not hf_token:
+            print("❌ HuggingFace API token missing")
 
             answer = "Image generation is currently unavailable. Please try again later."
 
@@ -1560,7 +1550,7 @@ def ai_study_helper(request):
                 subject="Image Generation (Failed)",
                 difficulty=difficulty,
                 user_tier_at_time=profile.subscription_tier,
-                api_provider="replicate",
+                api_provider="huggingface",
                 is_image_generation=True,
                 image_generation_failed=True
             )
@@ -1574,29 +1564,48 @@ def ai_study_helper(request):
             }, status=503)
 
         try:
-            print("🖼️ Connecting to Replicate...")
+            print("🖼️ Connecting to HuggingFace...")
 
-            client = replicate.Client(api_token=api_token)
-
-            output = client.run(
-                "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b",
-                input={
-                    "prompt": image_prompt,
+            model_id = "stabilityai/stable-diffusion-xl-base-1.0"
+            api_url = f"https://api-inference.huggingface.co/models/{model_id}"
+            
+            headers = {
+                "Authorization": f"Bearer {hf_token}",
+                "Content-Type": "application/json"
+            }
+            
+            payload = {
+                "inputs": image_prompt,
+                "parameters": {
                     "negative_prompt": "blurry, low quality, distorted, watermark, ugly",
                     "width": 1024,
                     "height": 1024,
-                    "num_outputs": 1,
-                    "guidance_scale": 7.5,
-                    "num_inference_steps": 25
+                    "num_inference_steps": 25,
+                    "guidance_scale": 7.5
+                },
+                "options": {
+                    "use_cache": True,
+                    "wait_for_model": True
                 }
-            )
-
-            image_url = output[0] if isinstance(output, list) else output
+            }
+            
+            response = requests.post(api_url, headers=headers, json=payload, timeout=60)
             response_time = int((time.time() - start_time) * 1000)
 
-            print(f"✅ Image generated: {image_url}")
+            if response.status_code == 200:
+                # Save image locally
+                image_data = response.content
+                filename = f"generated_{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
+                filepath = os.path.join(settings.MEDIA_ROOT, 'generated_images', filename)
+                os.makedirs(os.path.dirname(filepath), exist_ok=True)
+                
+                with open(filepath, 'wb') as f:
+                    f.write(image_data)
+                
+                image_url = f"{settings.MEDIA_URL}generated_images/{filename}"
+                print(f"✅ Image generated: {image_url}")
 
-            answer = f"""
+                answer = f"""
 🎨 **Image Generated Successfully**
 
 **Prompt:** {prompt}
@@ -1606,117 +1615,102 @@ def ai_study_helper(request):
 **Image URL:** {image_url}
 """
 
-            AIConversation.objects.create(
-                user=request.user,
-                prompt=prompt,
-                response=answer,
-                subject="Image Generation",
-                difficulty=difficulty,
-                user_tier_at_time=profile.subscription_tier,
-                model_used="stability-ai/sdxl",
-                api_provider="replicate",
-                is_image_generation=True,
-                image_url=image_url,
-                image_prompt=image_prompt,
-                response_time_ms=response_time
-            )
+                AIConversation.objects.create(
+                    user=request.user,
+                    prompt=prompt,
+                    response=answer,
+                    subject="Image Generation",
+                    difficulty=difficulty,
+                    user_tier_at_time=profile.subscription_tier,
+                    model_used=model_id,
+                    api_provider="huggingface",
+                    is_image_generation=True,
+                    image_url=image_url,
+                    image_prompt=image_prompt,
+                    response_time_ms=response_time
+                )
 
-            profile.record_request(tokens=150)
+                profile.record_request(tokens=150)
 
-            return Response({
-                "success": True,
-                "answer": answer,
-                "image_generated": True,
-                "image_url": image_url,
-                "response_time_ms": response_time
-            })
+                return Response({
+                    "success": True,
+                    "answer": answer,
+                    "image_generated": True,
+                    "image_url": image_url,
+                    "response_time_ms": response_time
+                })
+                
+            elif response.status_code == 503:
+                # Model loading
+                estimated_time = response.json().get("estimated_time", 30)
+                return Response({
+                    "success": False,
+                    "error": "Model is loading",
+                    "estimated_time": estimated_time
+                }, status=503)
+                
+            else:
+                error_msg = response.json().get("error", f"API error: {response.status_code}")
+                return Response({
+                    "success": False,
+                    "error": "Image generation failed",
+                    "details": error_msg
+                }, status=500)
 
         except Exception as e:
-            print("❌ Replicate error:", str(e))
-
+            print("❌ HuggingFace error:", str(e))
             return Response({
                 "success": False,
                 "error": "Image generation failed",
                 "details": str(e)
             }, status=500)
 
-    # ================= NORMAL AI CHAT =================
-
-    print("💬 Normal AI chat request")
-
-    api_key = profile.get_api_key()
-    using_system_fallback = False
-
+@api_view(['POST'])
+@permission_classes([IsAuthenticated])
+def setup_huggingface_key(request):
+    """Setup HuggingFace API key"""
+    api_key = request.data.get('api_key', '').strip()
+    
     if not api_key:
-        using_system_fallback = True
-
-        if profile.preferred_provider == "groq":
-            api_key = os.getenv("GROQ_API_KEY") or os.getenv("GROQ_FALLBACK_KEY")
+        return Response({"error": "API key required"}, status=400)
+    
+    profile = request.user.userprofile
+    
+    # Test HuggingFace key
+    try:
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        # Test with models list
+        response = requests.get(
+            "https://huggingface.co/api/models",
+            headers=headers,
+            timeout=10
+        )
+        
+        if response.status_code == 200:
+            profile.huggingface_api_key = api_key
+            profile.save()
+            
+            return Response({
+                "success": True,
+                "message": "HuggingFace API key saved and tested",
+                "provider": "huggingface",
+                "has_api_key": True
+            })
         else:
-            api_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_FALLBACK_KEY")
-
-    if not api_key:
+            return Response({
+                "success": False,
+                "error": f"Invalid API key: {response.status_code}"
+            }, status=400)
+            
+    except requests.exceptions.RequestException as e:
         return Response({
             "success": False,
-            "error": "API key not configured",
-            "message": "Please add your API key in profile settings"
-        }, status=402)
-
-    if not model:
-        model = profile.preferred_model
-
-    messages = [{"role": "user", "content": prompt}]
-
-    if profile.preferred_provider == "openai":
-        url = "https://api.openai.com/v1/chat/completions"
-    else:
-        url = "https://api.groq.com/openai/v1/chat/completions"
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-
-    payload = {
-        "model": model,
-        "messages": messages,
-        "temperature": 0.7,
-        "max_tokens": 2000
-    }
-
-    response = requests.post(url, headers=headers, json=payload, timeout=30)
-    response_data = response.json()
-    response_time = int((time.time() - start_time) * 1000)
-
-    if response.status_code != 200:
-        return Response({
-            "success": False,
-            "error": response_data
-        }, status=response.status_code)
-
-    answer = response_data["choices"][0]["message"]["content"]
-
-    AIConversation.objects.create(
-        user=request.user,
-        prompt=prompt,
-        response=answer,
-        subject=subject,
-        difficulty=difficulty,
-        user_tier_at_time=profile.subscription_tier,
-        model_used=model,
-        api_provider=profile.preferred_provider,
-        response_time_ms=response_time
-    )
-
-    profile.record_request(tokens=200)
-
-    return Response({
-        "success": True,
-        "answer": answer,
-        "provider": profile.preferred_provider,
-        "using_fallback": using_system_fallback,
-        "response_time_ms": response_time
-    })
+            "error": f"Connection error: {str(e)}"
+        }, status=400)
 
 @api_view(["POST"])
 @permission_classes([IsAuthenticated])

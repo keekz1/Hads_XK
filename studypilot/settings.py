@@ -289,7 +289,7 @@ ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 
 # Image Generation APIs
-REPLICATE_API_TOKEN = os.getenv("REPLICATE_API_TOKEN", "")
+HUGGINGFACE_TOKEN = os.environ.get('HUGGINGFACE_TOKEN', 'your_huggingface_token_here')
  
 # Fallback keys for system use
 GROQ_FALLBACK_KEY = os.getenv("GROQ_FALLBACK_KEY", "")
