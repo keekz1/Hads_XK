@@ -299,10 +299,36 @@ def generate_image(request):
         # Get token from settings
         api_token = getattr(settings, 'REPLICATE_API_TOKEN', None)
         
+        # DEBUG: Print token info
+        print(f"🔍 DEBUG: Checking Replicate API token...")
+        print(f"🔍 DEBUG: REPLICATE_API_TOKEN exists in settings: {hasattr(settings, 'REPLICATE_API_TOKEN')}")
+        print(f"🔍 DEBUG: Token value type: {type(api_token)}")
+        print(f"🔍 DEBUG: Token length: {len(api_token) if api_token else 0}")
+        print(f"🔍 DEBUG: Token starts with r8_: {api_token.startswith('r8_') if api_token else False}")
+        print(f"🔍 DEBUG: First 10 chars: {api_token[:10] if api_token else 'None'}")
+        
         if not api_token:
+            print("❌ REPLICATE_API_TOKEN is None or empty")
             return Response(
-                {"error": "Replicate API token not configured on server"},
+                {
+                    "success": False,
+                    "error": "Image generation service not configured",
+                    "message": "Replicate API token is missing. Please check server configuration.",
+                    "help": "Add REPLICATE_API_TOKEN to environment variables",
+                    "setup_url": "https://replicate.com/account/api-tokens"
+                },
                 status=status.HTTP_503_SERVICE_UNAVAILABLE
+            )
+        
+        if not api_token.startswith('r8_'):
+            print(f"❌ Invalid token format: Should start with 'r8_'")
+            return Response(
+                {
+                    "success": False,
+                    "error": "Invalid API token format",
+                    "message": "Replicate API token should start with 'r8_'"
+                },
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
         
         # Check user's usage limits
@@ -320,63 +346,129 @@ def generate_image(request):
                 }, status=status.HTTP_402_PAYMENT_REQUIRED)
         
         print(f"🖼️ Generating image for user {request.user.username}: {prompt[:50]}...")
+        print(f"🖼️ Using token: {api_token[:10]}...")
         
-        # Call Replicate API
-        output = replicate.run(
-            "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b",
-            input={
+        try:
+            # Call Replicate API with timeout
+            print(f"🖼️ Calling Replicate API...")
+            output = replicate.run(
+                "stability-ai/sdxl:39ed52f2a78e934b3ba6e2a89f5b1c712de7dfea535525255b1aa35c5565e08b",
+                input={
+                    "prompt": prompt,
+                    "negative_prompt": "blurry, low quality, distorted, watermark, text, ugly, bad anatomy",
+                    "width": 1024,
+                    "height": 1024,
+                    "num_outputs": 1,
+                    "guidance_scale": 7.5,
+                    "num_inference_steps": 25
+                },
+                api_token=api_token
+            )
+            
+            print(f"✅ Replicate API call successful")
+            print(f"✅ Output type: {type(output)}")
+            print(f"✅ Output: {output}")
+            
+            # Process output
+            if isinstance(output, list) and len(output) > 0:
+                image_url = output[0]
+            elif isinstance(output, str):
+                image_url = output
+            else:
+                # Try to extract URL from any output format
+                image_url = str(output)
+            
+            print(f"✅ Image URL: {image_url}")
+            
+            # Update user's image generation count if tracking
+            if hasattr(profile, 'image_generations_this_month'):
+                profile.image_generations_this_month += 1
+                profile.save()
+            
+            # Log the image generation with safe field creation
+            conversation_data = {
+                'user': request.user,
+                'prompt': f"Generate image: {prompt}",
+                'response': f"Image generated successfully. URL: {image_url}",
+                'subject': "Image Generation",
+                'difficulty': "medium",
+                'user_tier_at_time': profile.subscription_tier,
+                'model_used': "stability-ai/sdxl",
+                'api_provider': "replicate",
+            }
+            
+            # Only add image fields if they exist in the model
+            if hasattr(AIConversation, 'is_image_generation'):
+                conversation_data['is_image_generation'] = True
+            if hasattr(AIConversation, 'image_url'):
+                conversation_data['image_url'] = image_url
+            
+            conversation = AIConversation.objects.create(**conversation_data)
+            
+            return Response({
+                "success": True,
+                "image_url": image_url,
                 "prompt": prompt,
-                "negative_prompt": "blurry, low quality, distorted, watermark, text, ugly",
-                "width": 1024,
-                "height": 1024,
-                "num_outputs": 1,
-                "guidance_scale": 7.5,
-                "num_inference_steps": 25
-            },
-            api_token=api_token
-        )
-        
-        image_url = output[0] if isinstance(output, list) else output
-        
-        # Update user's image generation count if tracking
-        if hasattr(profile, 'image_generations_this_month'):
-            profile.image_generations_this_month += 1
-            profile.save()
-        
-        # Log the image generation
-        conversation = AIConversation.objects.create(
-            user=request.user,
-            prompt=f"Generate image: {prompt}",
-            response=f"Image generated successfully. URL: {image_url}",
-            subject="Image Generation",
-            difficulty="medium",
-            user_tier_at_time=profile.subscription_tier,
-            model_used="stability-ai/sdxl",
-            api_provider="replicate",
-            is_image_generation=True
-        )
-        
-        return Response({
-            "success": True,
-            "image_url": image_url,
-            "prompt": prompt,
-            "message": "Image generated successfully",
-            "image_html": f'<img src="{image_url}" alt="{prompt[:50]}" style="max-width:100%; border-radius:8px;" />',
-            "markdown": f"![{prompt[:50]}...]({image_url})"
-        })
-        
-    except replicate.exceptions.ReplicateError as e:
-        print(f"Replicate API error: {e}")
-        return Response({
-            "success": False,
-            "error": f"Image generation failed: {str(e)[:100]}"
-        }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                "message": "Image generated successfully",
+                "image_html": f'<img src="{image_url}" alt="{prompt[:50]}" style="max-width:100%; border-radius:8px;" />',
+                "markdown": f"![{prompt[:50]}...]({image_url})",
+                "debug": {
+                    "token_configured": True,
+                    "token_length": len(api_token),
+                    "output_type": type(output).__name__
+                }
+            })
+            
+        except replicate.exceptions.ReplicateError as e:
+            print(f"❌ Replicate API error: {e}")
+            error_details = str(e)
+            
+            if "authentication" in error_details.lower() or "token" in error_details.lower():
+                return Response({
+                    "success": False,
+                    "error": "Invalid Replicate API token",
+                    "details": "The API token is invalid or expired. Please check your Replicate account.",
+                    "help": "Get a new token from https://replicate.com/account/api-tokens",
+                    "original_error": error_details[:200]
+                }, status=status.HTTP_401_UNAUTHORIZED)
+            elif "quota" in error_details.lower() or "credit" in error_details.lower():
+                return Response({
+                    "success": False,
+                    "error": "Insufficient credits",
+                    "details": "Your Replicate account has insufficient credits.",
+                    "help": "Add credits to your Replicate account",
+                    "original_error": error_details[:200]
+                }, status=status.HTTP_402_PAYMENT_REQUIRED)
+            else:
+                return Response({
+                    "success": False,
+                    "error": "Replicate API error",
+                    "details": error_details[:200],
+                    "help": "Check Replicate status: https://status.replicate.com/"
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                
+        except Exception as e:
+            print(f"❌ Unexpected error during Replicate call: {e}")
+            import traceback
+            traceback.print_exc()
+            return Response({
+                "success": False,
+                "error": "Image generation failed",
+                "details": str(e)[:200],
+                "debug": {
+                    "token_configured": True,
+                    "token_length": len(api_token),
+                    "error_type": type(e).__name__
+                }
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
     except Exception as e:
-        print(f"Image generation error: {e}")
+        print(f"❌ General error in generate_image: {e}")
+        import traceback
+        traceback.print_exc()
         return Response({
             "success": False,
-            "error": f"Image generation failed: {str(e)[:100]}"
+            "error": f"Server error: {str(e)[:100]}"
         }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
         
 @api_view(['POST'])
