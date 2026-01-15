@@ -1461,10 +1461,10 @@ class AIConversationList(generics.ListAPIView):
         return AIConversation.objects.filter(user=self.request.user).order_by("-created_at")
 
 @api_view(["POST"])
-@permission_classes([IsAuthenticated])
+@permission_classes([AllowAny])  # Change from IsAuthenticated to AllowAny
 def ai_study_helper(request):
-    """Main AI chat endpoint with image generation + proxy AI support"""
-
+    """Main AI chat endpoint - now available for both authenticated and unauthenticated users"""
+    
     import os
     import time
     import requests
@@ -1472,23 +1472,53 @@ def ai_study_helper(request):
     from django.conf import settings
 
     print("=== AI CHAT REQUEST STARTED ===")
+    print(f"User: {request.user if request.user.is_authenticated else 'Anonymous'}")
     start_time = time.time()
 
     # ================= REQUEST DATA =================
-
     prompt = request.data.get("prompt", "").strip()
     subject = request.data.get("subject", "General")
     difficulty = request.data.get("difficulty", "Beginner")
     model = request.data.get("model", None)
+    is_anonymous = request.data.get("is_anonymous", False)  # New flag for anonymous chat
 
     print(f"Prompt: {prompt[:80]}")
     print(f"Subject: {subject} | Difficulty: {difficulty}")
+    print(f"Authenticated: {request.user.is_authenticated}")
 
     if not prompt:
         return Response({"error": "Prompt is required"}, status=400)
 
-    # ================= IMAGE DETECTION =================
+    # ================= ANONYMOUS USER LIMITS =================
+    # Check if this is an anonymous user
+    is_anonymous_user = not request.user.is_authenticated
+    
+    if is_anonymous_user:
+        print("👤 Anonymous user detected - applying limits")
+        
+        # Simple rate limiting for anonymous users
+        # You could implement IP-based rate limiting here
+        # For now, we'll just check prompt length
+        if len(prompt) > 1000:
+            return Response({
+                "success": False,
+                "error": "Prompt too long for anonymous users. Please sign up for longer conversations.",
+                "max_length": 1000,
+                "signup_url": "/register/"
+            }, status=400)
+        
+        # Check for image requests from anonymous users
+        if detect_image_request(prompt):
+            return Response({
+                "success": False,
+                "error": "Image generation requires an account. Please sign up or log in.",
+                "signup_url": "/register/"
+            }, status=403)
+        
+        # Limit number of messages from anonymous users
+        # You could implement session-based limits here
 
+    # ================= IMAGE DETECTION =================
     def detect_image_request(text):
         keywords = [
             "generate image", "create image", "make image", "draw", "sketch",
@@ -1514,16 +1544,26 @@ def ai_study_helper(request):
         return f"{cleaned}, high quality, detailed, professional"
 
     # ================= USER PROFILE =================
-
-    try:
-        profile = request.user.userprofile
-        print(f"Profile found: {profile.subscription_tier}")
-    except UserProfile.DoesNotExist:
-        profile = UserProfile.objects.create(user=request.user, level="beginner")
+    profile = None
+    if request.user.is_authenticated:
+        try:
+            profile = request.user.userprofile
+            print(f"Profile found: {profile.subscription_tier}")
+        except UserProfile.DoesNotExist:
+            profile = UserProfile.objects.create(user=request.user, level="beginner")
+    else:
+        print("👤 No profile - using anonymous mode")
 
     # ================= IMAGE GENERATION USING STABILITY AI =================
-
+    # Image generation only for authenticated users
     if detect_image_request(prompt):
+        if is_anonymous_user:
+            return Response({
+                "success": False,
+                "error": "Image generation requires an account. Please sign up or log in.",
+                "signup_url": "/register/"
+            }, status=403)
+        
         print("🎨 Image generation request detected")
         
         image_prompt = extract_image_prompt(prompt)
@@ -1586,98 +1626,57 @@ def ai_study_helper(request):
                 import base64
                 data = response.json()
                 
-                # Save image from base64
-                image_data = base64.b64decode(data["artifacts"][0]["base64"])
-                
-                filename = f"generated_{int(time.time())}_{uuid.uuid4().hex[:8]}.png"
-                filepath = os.path.join(settings.MEDIA_ROOT, 'generated_images', filename)
-                
-                # Ensure directory exists
-                os.makedirs(os.path.dirname(filepath), exist_ok=True)
-                
-                # Save image
-                with open(filepath, 'wb') as f:
-                    f.write(image_data)
-                
-                # FIXED: Create proper image URL
-                # For Railway/Vercel deployment, we need to use the absolute URL
-                if settings.DEBUG:
-                    # Local development
-                    base_url = request.build_absolute_uri('/')[:-1]
-                    image_url = f"{base_url}{settings.MEDIA_URL}generated_images/{filename}"
-                else:
-                    # Production - use the full absolute path
-                    # Get the current domain from request
-                    scheme = 'https' if request.is_secure() else 'http'
-                    host = request.get_host()
-                    base_url = f"{scheme}://{host}"
-                    image_url = f"{base_url}{settings.MEDIA_URL}generated_images/{filename}"
-                
-                print(f"✅ Image saved: {filepath}")
-                print(f"✅ Image URL: {image_url}")
-                print(f"✅ Media URL: {settings.MEDIA_URL}")
-                print(f"✅ Media Root: {settings.MEDIA_ROOT}")
-                
-                # Test if file exists
-                if os.path.exists(filepath):
-                    file_size = os.path.getsize(filepath)
-                    print(f"✅ File exists: {filepath}, Size: {file_size} bytes")
-                else:
-                    print(f"❌ File NOT found: {filepath}")
+                # Get base64 image data
+                image_base64 = data["artifacts"][0]["base64"]
+                image_data_url = f"data:image/png;base64,{image_base64}"
                 
                 answer = f"""
 🎨 **Image Generated Successfully**
 
 **Prompt:** {prompt}
 
-![Generated Image]({image_url})
+![Generated Image]({image_data_url})
 
-**Image URL:** {image_url}
-
-*Tip: Click the image to view full size. Right-click to save.*
+*Tip: Right-click and save image to download.*
 """
 
-                # Create conversation record
-                conversation_data = {
-                    'user': request.user,
-                    'prompt': prompt,
-                    'response': answer,
-                    'subject': "Image Generation",
-                    'difficulty': difficulty,
-                    'user_tier_at_time': profile.subscription_tier,
-                    'model_used': "stable-diffusion-xl-1024-v1-0",
-                    'api_provider': "stability-ai",
-                    'response_time_ms': response_time,
-                }
-                
-                # Add image fields if they exist in the model
-                if hasattr(AIConversation, 'is_image_generation'):
-                    conversation_data['is_image_generation'] = True
-                if hasattr(AIConversation, 'image_url'):
-                    conversation_data['image_url'] = image_url
-                if hasattr(AIConversation, 'image_prompt'):
-                    conversation_data['image_prompt'] = image_prompt
-                
-                conversation = AIConversation.objects.create(**conversation_data)
-                print(f"✅ Conversation logged: {conversation.id}")
-
-                profile.record_request(tokens=150)
+                # Create conversation record only for authenticated users
+                if request.user.is_authenticated:
+                    conversation_data = {
+                        'user': request.user,
+                        'prompt': prompt,
+                        'response': answer,
+                        'subject': "Image Generation",
+                        'difficulty': difficulty,
+                        'user_tier_at_time': profile.subscription_tier,
+                        'model_used': "stable-diffusion-xl-1024-v1-0",
+                        'api_provider': "stability-ai",
+                        'response_time_ms': response_time,
+                    }
+                    
+                    # Add image fields if they exist in the model
+                    if hasattr(AIConversation, 'is_image_generation'):
+                        conversation_data['is_image_generation'] = True
+                    if hasattr(AIConversation, 'image_url'):
+                        conversation_data['image_url'] = image_data_url
+                    if hasattr(AIConversation, 'image_prompt'):
+                        conversation_data['image_prompt'] = image_prompt
+                    
+                    conversation = AIConversation.objects.create(**conversation_data)
+                    print(f"✅ Conversation logged: {conversation.id}")
+                    
+                    # Update user profile
+                    profile.record_request(tokens=150)
 
                 return Response({
                     "success": True,
                     "answer": answer,
                     "image_generated": True,
-                    "image_url": image_url,
-                    "image_filename": filename,
-                    "file_path": filepath,
-                    "debug_info": {
-                        "media_url": settings.MEDIA_URL,
-                        "media_root": str(settings.MEDIA_ROOT),
-                        "file_exists": os.path.exists(filepath),
-                        "host": request.get_host(),
-                        "scheme": 'https' if request.is_secure() else 'http'
-                    },
-                    "response_time_ms": response_time
+                    "image_data_url": image_data_url,
+                    "image_base64": image_base64,
+                    "response_time_ms": response_time,
+                    "requires_account": False,
+                    "is_anonymous": False
                 })
                 
             elif response.status_code == 401:
@@ -1691,20 +1690,18 @@ def ai_study_helper(request):
             elif response.status_code == 400:
                 error_text = response.text[:500]
                 print(f"❌ API error 400: {error_text}")
-                
-                # Try with different valid dimensions
-                print("🔄 Trying with different dimensions: 1024x1024")
-                return try_stability_ai_with_dimensions(
-                    request, profile, image_prompt, prompt, difficulty, start_time,
-                    stability_api_key, width=1024, height=1024
-                )
+                return Response({
+                    "success": False,
+                    "error": "Image generation failed. Please try a different prompt.",
+                    "details": error_text[:200]
+                }, status=400)
                 
             else:
                 error_text = response.text[:200]
                 print(f"❌ API error {response.status_code}: {error_text}")
                 return Response({
                     "success": False,
-                    "error": f"API error {response.status_code}",
+                    "error": f"Image generation error: {response.status_code}",
                     "details": error_text
                 }, status=response.status_code)
                 
@@ -1719,33 +1716,48 @@ def ai_study_helper(request):
             }, status=500)
 
     # ================= NORMAL AI CHAT =================
+    print("💬 AI chat request")
 
-    print("💬 Normal AI chat request")
-
-    api_key = profile.get_api_key()
-    using_system_fallback = False
-
-    if not api_key:
+    # Use system API key for anonymous users
+    if is_anonymous_user:
+        print("👤 Using system API key for anonymous user")
+        # Use Groq for anonymous users (it's free!)
+        api_key = os.getenv("GROQ_API_KEY") or os.getenv("GROQ_FALLBACK_KEY")
+        provider = "groq"
+        model = "llama-3.1-8b-instant"
         using_system_fallback = True
+    else:
+        # Authenticated users use their own API key or system fallback
+        api_key = profile.get_api_key() if profile else None
+        using_system_fallback = False
 
-        if profile.preferred_provider == "groq":
-            api_key = os.getenv("GROQ_API_KEY") or os.getenv("GROQ_FALLBACK_KEY")
-        else:
-            api_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_FALLBACK_KEY")
+        if not api_key:
+            using_system_fallback = True
+            if profile and profile.preferred_provider == "groq":
+                api_key = os.getenv("GROQ_API_KEY") or os.getenv("GROQ_FALLBACK_KEY")
+            else:
+                api_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_FALLBACK_KEY")
 
     if not api_key:
-        return Response({
-            "success": False,
-            "error": "API key not configured",
-            "message": "Please add your API key in profile settings"
-        }, status=402)
+        if is_anonymous_user:
+            return Response({
+                "success": False,
+                "error": "Service temporarily unavailable. Please try again later.",
+                "message": "The AI service is currently unavailable for anonymous chat."
+            }, status=503)
+        else:
+            return Response({
+                "success": False,
+                "error": "API key not configured",
+                "message": "Please add your API key in profile settings"
+            }, status=402)
 
-    if not model:
-        model = profile.preferred_model
+    if not model and not is_anonymous_user:
+        model = profile.preferred_model if profile else "gpt-3.5-turbo"
 
     messages = [{"role": "user", "content": prompt}]
 
-    if profile.preferred_provider == "openai":
+    if provider == "openai":
         url = "https://api.openai.com/v1/chat/completions"
     else:
         url = "https://api.groq.com/openai/v1/chat/completions"
@@ -1759,7 +1771,7 @@ def ai_study_helper(request):
         "model": model,
         "messages": messages,
         "temperature": 0.7,
-        "max_tokens": 2000
+        "max_tokens": 1000 if is_anonymous_user else 2000  # Limit tokens for anonymous users
     }
 
     try:
@@ -1770,33 +1782,50 @@ def ai_study_helper(request):
         if response.status_code != 200:
             print(f"❌ API error: {response.status_code}")
             print(f"Error details: {response_data}")
-            return Response({
-                "success": False,
-                "error": response_data
-            }, status=response.status_code)
+            
+            # Provide user-friendly error for anonymous users
+            if is_anonymous_user:
+                return Response({
+                    "success": False,
+                    "error": "AI service is busy. Please try again or sign up for better reliability.",
+                    "signup_suggestion": True,
+                    "signup_url": "/register/"
+                }, status=response.status_code)
+            else:
+                return Response({
+                    "success": False,
+                    "error": response_data
+                }, status=response.status_code)
 
         answer = response_data["choices"][0]["message"]["content"]
 
-        AIConversation.objects.create(
-            user=request.user,
-            prompt=prompt,
-            response=answer,
-            subject=subject,
-            difficulty=difficulty,
-            user_tier_at_time=profile.subscription_tier,
-            model_used=model,
-            api_provider=profile.preferred_provider,
-            response_time_ms=response_time
-        )
+        # Only log conversation for authenticated users
+        if request.user.is_authenticated and profile:
+            AIConversation.objects.create(
+                user=request.user,
+                prompt=prompt,
+                response=answer,
+                subject=subject,
+                difficulty=difficulty,
+                user_tier_at_time=profile.subscription_tier,
+                model_used=model,
+                api_provider=provider,
+                response_time_ms=response_time
+            )
 
-        profile.record_request(tokens=200)
+            profile.record_request(tokens=200)
 
         return Response({
             "success": True,
             "answer": answer,
-            "provider": profile.preferred_provider,
+            "provider": provider,
             "using_fallback": using_system_fallback,
-            "response_time_ms": response_time
+            "response_time_ms": response_time,
+            "is_anonymous": is_anonymous_user,
+            "requires_account": False,
+            "upgrade_suggestion": is_anonymous_user,  # Suggest signup to anonymous users
+            "signup_url": "/register/" if is_anonymous_user else None,
+            "features_unlocked": not is_anonymous_user  # Show what they unlock by signing up
         })
         
     except requests.exceptions.Timeout:
@@ -1816,7 +1845,150 @@ def ai_study_helper(request):
             "details": str(e)[:200]
         }, status=500)
 
+@api_view(['POST'])
+@permission_classes([AllowAny])
+def anonymous_chat(request):
+    """Free anonymous chat endpoint - no registration required"""
+    print("=== ANONYMOUS CHAT REQUEST ===")
+    
+    # Get IP address for rate limiting (optional)
+    ip_address = request.META.get('REMOTE_ADDR', 'unknown')
+    print(f"IP Address: {ip_address}")
+    
+    prompt = request.data.get("prompt", "").strip()
+    
+    if not prompt:
+        return Response({"error": "Message is required"}, status=400)
+    
+    # Simple rate limiting based on IP (optional)
+    # You could implement Redis-based rate limiting here
+    
+    # Limit prompt length for anonymous users
+    if len(prompt) > 1000:
+        return Response({
+            "error": "Message too long. Please keep it under 1000 characters.",
+            "max_length": 1000
+        }, status=400)
+    
+    # Use the existing ai_study_helper logic for anonymous users
+    # Create a mock request with is_anonymous flag
+    from django.contrib.auth.models import AnonymousUser
+    request.user = AnonymousUser()
+    
+    # Call a simplified version of the AI helper
+    try:
+        # Use Groq API (free tier)
+        api_key = os.getenv("GROQ_API_KEY") or os.getenv("GROQ_FALLBACK_KEY")
+        
+        if not api_key:
+            return Response({
+                "success": False,
+                "error": "Service temporarily unavailable",
+                "message": "Please try again later or sign up for more reliable access."
+            }, status=503)
+        
+        url = "https://api.groq.com/openai/v1/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json"
+        }
+        
+        messages = [
+            {
+                "role": "system",
+                "content": "You are a helpful AI assistant. Keep responses concise and helpful."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ]
+        
+        payload = {
+            "model": "llama-3.1-8b-instant",
+            "messages": messages,
+            "temperature": 0.7,
+            "max_tokens": 800  # Limit tokens for free tier
+        }
+        
+        response = requests.post(url, headers=headers, json=payload, timeout=20)
+        
+        if response.status_code == 200:
+            response_data = response.json()
+            answer = response_data["choices"][0]["message"]["content"]
+            
+            return Response({
+                "success": True,
+                "answer": answer,
+                "is_free_tier": True,
+                "model": "llama-3.1-8b-instant",
+                "provider": "groq",
+                "signup_suggestion": {
+                    "message": "✨ Sign up for free to unlock:",
+                    "features": [
+                        "Longer conversations",
+                        "Image generation",
+                        "Document analysis",
+                        "Conversation history",
+                        "Higher limits"
+                    ],
+                    "signup_url": "/register/",
+                    "login_url": "/login/"
+                }
+            })
+        else:
+            return Response({
+                "success": False,
+                "error": "AI service is busy",
+                "message": "Please try again in a moment or sign up for more reliable access.",
+                "signup_url": "/register/"
+            }, status=503)
+            
+    except Exception as e:
+        print(f"Anonymous chat error: {e}")
+        return Response({
+            "success": False,
+            "error": "Service unavailable",
+            "message": "Please try again later."
+        }, status=500)
 
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def get_free_features(request):
+    """Get information about free features"""
+    return Response({
+        "success": True,
+        "free_features": {
+            "anonymous_chat": {
+                "available": True,
+                "description": "Free AI chat without registration",
+                "limits": {
+                    "max_message_length": 1000,
+                    "model": "llama-3.1-8b-instant (Groq)",
+                    "response_length": "Limited",
+                    "rate_limit": "Fair usage policy"
+                },
+                "endpoint": "/api/anonymous-chat/"
+            },
+            "signup_benefits": {
+                "free_account": [
+                    "Basic AI chat with higher limits",
+                    "Conversation history",
+                    "Choose between Groq (free) or OpenAI",
+                    "50 requests/day"
+                ],
+                "premium_features": [
+                    "Image generation",
+                    "Document upload & analysis",
+                    "Advanced AI models",
+                    "Higher rate limits"
+                ]
+            }
+        },
+        "signup_url": "/register/",
+        "login_url": "/login/"
+    })
 def try_stability_ai_with_dimensions(request, profile, image_prompt, original_prompt, difficulty, start_time, api_key, width=1024, height=1024):
     """Try Stability AI with different dimensions"""
     try:

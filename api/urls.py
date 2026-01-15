@@ -21,7 +21,8 @@ urlpatterns = [
     path('refresh-token/', views.refresh_token, name='token_refresh'),
     path('current-user/', views.get_current_user, name='current_user'),
     path('profile/', views.my_profile, name='my_profile'),
-    
+    path('anonymous-chat/', views.anonymous_chat, name='anonymous_chat'),  # New
+    path('free-features/', views.get_free_features, name='free_features'),  # New
     # === DOCUMENT UPLOAD & ANALYSIS ===
     path('upload-document/', views.upload_document, name='upload_document'),
     path('documents/', views.get_user_documents, name='get_user_documents'),
